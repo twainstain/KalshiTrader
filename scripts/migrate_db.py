@@ -1,0 +1,218 @@
+"""DB migrations for Phase-1 Kalshi research tables.
+
+Works against SQLite (default `data/kalshi.db`) or Postgres via
+`DATABASE_URL=postgresql://...`. Schema is intentionally plain SQL so both
+backends accept it — no ORMs, no backend-specific column types. Tables are
+exactly the five listed in execution plan §2.4 plus the `shadow_decisions`
+columns enumerated in implementation-tasks P1-M4-T03.
+
+Run:
+    python3.11 scripts/migrate_db.py
+    DATABASE_URL=postgresql://... python3.11 scripts/migrate_db.py
+
+Idempotent: all statements use `IF NOT EXISTS`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sqlite3
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+
+logger = logging.getLogger(__name__)
+
+
+# Ordering: `reference_ticks` before `shadow_decisions` for clarity, but
+# there are no FKs yet — Phase 1 keeps ingestion loose to catch real vs.
+# synthesized mismatches during analysis.
+SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_historical_markets (
+        market_ticker TEXT PRIMARY KEY,
+        series_ticker TEXT NOT NULL,
+        event_ticker  TEXT NOT NULL,
+        strike        TEXT NOT NULL,
+        comparator    TEXT NOT NULL,
+        open_ts       BIGINT NOT NULL,
+        close_ts      BIGINT NOT NULL,
+        expiration_ts BIGINT NOT NULL,
+        settled_result TEXT,
+        volume        TEXT,
+        raw_json      TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_khm_series ON kalshi_historical_markets (series_ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_khm_expiration ON kalshi_historical_markets (expiration_ts)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_historical_trades (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker TEXT NOT NULL,
+        ts_us         BIGINT NOT NULL,
+        price         TEXT NOT NULL,
+        qty           TEXT NOT NULL,
+        taker_side    TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kht_ticker_ts ON kalshi_historical_trades (market_ticker, ts_us)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_live_book_snapshots (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker TEXT NOT NULL,
+        ts_us         BIGINT NOT NULL,
+        seq           BIGINT,
+        yes_bids_json TEXT NOT NULL,
+        no_bids_json  TEXT NOT NULL,
+        warning_flags TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_klbs_ticker_ts ON kalshi_live_book_snapshots (market_ticker, ts_us)",
+
+    """
+    CREATE TABLE IF NOT EXISTS reference_ticks (
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset  TEXT NOT NULL,
+        ts_us  BIGINT NOT NULL,
+        price  TEXT NOT NULL,
+        src    TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_rt_asset_ts ON reference_ticks (asset, ts_us)",
+
+    """
+    CREATE TABLE IF NOT EXISTS shadow_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker  TEXT   NOT NULL,
+        ts_us          BIGINT NOT NULL,
+        p_yes          TEXT   NOT NULL,
+        ci_width       TEXT   NOT NULL,
+        reference_price     TEXT NOT NULL,
+        reference_60s_avg   TEXT NOT NULL,
+        time_remaining_s    TEXT NOT NULL,
+        best_yes_ask        TEXT NOT NULL,
+        best_no_ask         TEXT NOT NULL,
+        book_depth_yes_usd  TEXT NOT NULL,
+        book_depth_no_usd   TEXT NOT NULL,
+        recommended_side             TEXT NOT NULL,
+        hypothetical_fill_price      TEXT NOT NULL,
+        hypothetical_size_contracts  TEXT NOT NULL,
+        expected_edge_bps_after_fees TEXT NOT NULL,
+        fee_bps_at_decision          TEXT NOT NULL,
+        realized_outcome             TEXT,
+        realized_pnl_usd             TEXT,
+        latency_ms_ref_to_decision   TEXT,
+        latency_ms_book_to_decision  TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sd_ticker ON shadow_decisions (market_ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_sd_ts ON shadow_decisions (ts_us)",
+    "CREATE INDEX IF NOT EXISTS idx_sd_outcome ON shadow_decisions (realized_outcome)",
+)
+
+
+ALL_TABLES: tuple[str, ...] = (
+    "kalshi_historical_markets",
+    "kalshi_historical_trades",
+    "kalshi_live_book_snapshots",
+    "reference_ticks",
+    "shadow_decisions",
+)
+
+
+def _database_url(override: str | None = None) -> str:
+    if override:
+        return override
+    return os.environ.get("DATABASE_URL", "")
+
+
+def _translate_for_sqlite(stmt: str) -> str:
+    # Postgres `BIGINT` is a SQLite alias to INTEGER — no translation needed.
+    # We only need to strip `AUTOINCREMENT` gymnastics if they appear on
+    # Postgres, but our schema uses `INTEGER PRIMARY KEY AUTOINCREMENT` which
+    # SQLite recognises natively and Postgres does not — keep `sqlite`-first
+    # spelling and rewrite for Postgres instead.
+    return stmt
+
+
+def _translate_for_postgres(stmt: str) -> str:
+    return (
+        stmt
+        .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    )
+
+
+def migrate(url: str) -> None:
+    """Apply all schema statements against the DB at `url`.
+
+    Supports `sqlite:///...` (absolute or relative path) and
+    `postgresql://...`. Anything else raises `ValueError`.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme in ("sqlite", ""):
+        # SQLAlchemy convention: sqlite:///rel.db (3 slashes) is relative,
+        # sqlite:////abs.db (4 slashes) is absolute. urlparse gives us
+        # `/rel.db` or `//abs.db`, so: exactly one leading slash → relative,
+        # two+ → absolute (keep first slash after stripping one).
+        raw = parsed.path or url.removeprefix("sqlite://")
+        if raw.startswith("//"):
+            db_path = Path(raw[1:])  # absolute path
+        elif raw.startswith("/"):
+            db_path = Path(raw.lstrip("/"))  # relative to CWD
+        else:
+            db_path = Path(raw)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            for stmt in SCHEMA_STATEMENTS:
+                conn.execute(_translate_for_sqlite(stmt))
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info("sqlite migration complete: %s", db_path)
+        return
+
+    if parsed.scheme in ("postgres", "postgresql"):
+        import psycopg2  # deferred import — not needed for sqlite dev
+
+        conn = psycopg2.connect(url)
+        try:
+            with conn.cursor() as cur:
+                for stmt in SCHEMA_STATEMENTS:
+                    cur.execute(_translate_for_postgres(stmt))
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info("postgres migration complete: %s", url)
+        return
+
+    raise ValueError(f"Unsupported DATABASE_URL scheme: {parsed.scheme!r}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Kalshi P1 DB migrations.")
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help="Override DATABASE_URL (default: env var, else sqlite:///data/kalshi.db).",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    url = args.database_url or _database_url() or "sqlite:///data/kalshi.db"
+    migrate(url)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

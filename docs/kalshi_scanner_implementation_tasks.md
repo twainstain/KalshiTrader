@@ -2,7 +2,7 @@
 
 **Research date:** 2026-04-19
 **Structure:** Two phases — Phase 1 (Scanner / Feasibility Research, zero money at risk) → Phase 1→2 Gate → Phase 2 (Execution, real money).
-**Status:** Pre-implementation — all tasks `[ ]`.
+**Status:** P1-M0 scaffolding complete + P1-M1 code scaffolding complete (2026-04-19). Blocked on P-02 demo key for live WS handshake + `get_balance()` validation — all unit-test paths green with mocked client (78 passing).
 **Companion docs:** [`kalshi_crypto_fair_value_scanner_plan.md`](./kalshi_crypto_fair_value_scanner_plan.md) (strategy), [`kalshi_scanner_execution_plan.md`](./kalshi_scanner_execution_plan.md) (architecture / how-to).
 **Repo:** `/Users/tamir.wainstain/src/KalshiTrader/` — everything (docs + code + tests + configs + deploy) lives here. All paths below are relative to this repo unless prefixed.
 
@@ -26,10 +26,10 @@
 
 | Phase | Milestone | Status | Done / Total |
 |---|---|---|---|
-| — | Open architectural decisions (repo bootstrap + platform primitives) | pending | 0 / 2 |
+| — | Open architectural decisions (repo bootstrap + platform primitives) | resolved | 2 / 2 |
 | — | Prerequisites | not started | 0 / 5 |
-| P1 | M0 Repo prep | not started | 0 / 6 |
-| P1 | M1 Live data collection | not started | 0 / 13 |
+| P1 | M0 Repo prep | **complete** | **6 / 6** |
+| P1 | M1 Live data collection | **code complete (2 live-gated)** | **11 / 13** |
 | P1 | M2 Historical data collection | not started | 0 / 6 |
 | P1 | M3 Fair-value model + backtest | not started | 0 / 8 |
 | P1 | M4 Live shadow evaluator | not started | 0 / 7 |
@@ -42,7 +42,7 @@
 | P2 | M5 Live small size (2 weeks) | not started | 0 / 5 |
 | P2 | M6 Scale | not started | 0 / 4 |
 | — | Cross-cutting | not started | 0 / 4 |
-| **Total** | | **not started** | **0 / 89** |
+| **Total** | | **in progress** | **19 / 89** |
 
 ## 3. Kalshi API reference card (source of truth)
 
@@ -140,7 +140,7 @@ Writes = order-mutating endpoints only. Current tier: `GET /account/api-limits`.
 Track status here; resolutions feed every downstream task.
 
 - [x] **A-01. Platform primitives.** **Resolved 2026-04-19: option (a) — add `trading_platform` as submodule at `lib/trading_platform/` + local `src/platform_adapters.py`.** Upstream URL: `https://github.com/twainstain/trading-platform.git` (same as the DEX-bot repo uses).
-- [ ] **A-02. Repo shell bootstrap.** Choose: (a) selective restore from git history (keep generic scaffolding like `pyproject.toml`, `docker-compose.yml`, `scripts/migrate_db.py`, persistence, pytest; drop DEX-specific modules); (b) start fresh. **Working tree check (2026-04-19):** `src/`, `tests/`, `scripts/`, `lib/` all absent from disk — DEX code has been deleted from the working tree, only pending the cleanup commit. This effectively makes option (b) the default-by-state. Confirm or execute (a) before P1-M0-T01.
+- [x] **A-02. Repo shell bootstrap. Resolved 2026-04-19: option (b) — start fresh.** Working tree was clean on `master` with no `src/` / `tests/` / `scripts/` / `lib/` on disk, making (b) the default-by-state. New Kalshi-focused files authored directly rather than reviving the prior DEX-focused scaffolding.
 
 ## 5. Prerequisites (complete before P1-M0)
 
@@ -162,12 +162,14 @@ Track status here; resolutions feed every downstream task.
 
 ## P1-M0 — Repo prep (1 day, assuming A-01 + A-02 resolved)
 
-- [ ] **P1-M0-T01.** Execute A-02's choice. If "selective restore": `git checkout <pre-cleanup-commit> -- pyproject.toml docker-compose.yml Dockerfile scripts/migrate_db.py src/persistence/ src/env.py src/core/models.py tests/conftest.py` (tune list per what's needed); then `git rm` all DEX-specific modules not in the scope. If "start fresh": create empty `src/`, `tests/`, `scripts/` layouts.
-- [ ] **P1-M0-T02.** Execute A-01's choice. If "submodule": `git submodule add <URL> lib/trading_platform`. Wire a minimal `src/platform_adapters.py` re-exporting `CircuitBreaker`, `CircuitBreakerConfig`, `RetryPolicy`, `PriorityQueue`, plus a `KalshiAPIError` local class.
-- [ ] **P1-M0-T03.** Update `pyproject.toml` deps: add `kalshi_python_sync`, `websockets>=12`, `pandas>=2.0`, `pyarrow>=15.0`. Keep `psycopg2-binary`, `fastapi`, `uvicorn`, `requests`, `python-dotenv`, `pytest`. Install: `pip install -e .`.
-- [ ] **P1-M0-T04.** Append Kalshi env vars to `.env.example`: `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_ENV` (`demo`|`prod`), `CF_BENCHMARKS_API_KEY` (blank for P1).
-- [ ] **P1-M0-T05.** In `src/core/models.py`, add `SUPPORTED_VENUES = ("kalshi",)` alongside `SUPPORTED_CHAINS` (or create the file if A-02 = "start fresh"). Add the Kalshi-specific `MarketQuote` fields per execution plan §2.1.
-- [ ] **P1-M0-T06.** Add Phase-1 research tables to `scripts/migrate_db.py`: `kalshi_historical_markets`, `kalshi_historical_trades`, `kalshi_live_book_snapshots`, `reference_ticks`, `shadow_decisions` (schema in execution plan §2.4 + P1-M4-T03 for `shadow_decisions`). Migration runs clean on SQLite and Postgres dump.
+- [x] **P1-M0-T01.** Start-fresh bootstrap. Created `src/`, `tests/`, `scripts/` layout. (2026-04-19)
+- [x] **P1-M0-T02.** `trading_platform` added as submodule at `lib/trading_platform/`. `src/platform_adapters.py` re-exports `CircuitBreaker`, `CircuitBreakerConfig`, `BreakerState`, `RetryPolicy`, `RetryResult`, `config_hash`, `execute_with_retry`, `PriorityQueue`, `QueuedItem`; adds local `KalshiAPIError`. (2026-04-19)
+- [x] **P1-M0-T03.** `pyproject.toml` lists `kalshi_python_sync`, `websockets>=12`, `pandas>=2.0`, `pyarrow>=15.0`, `psycopg2-binary`, `fastapi`, `uvicorn[standard]`, `requests`, `python-dotenv`, `pytest`. Run `pip install -e .` to activate. (2026-04-19)
+- [x] **P1-M0-T04.** `.env.example` holds `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_ENV`, `CF_BENCHMARKS_API_KEY`, `DATABASE_URL`. (2026-04-19)
+- [x] **P1-M0-T05.** `src/core/models.py` exports `SUPPORTED_VENUES = ("kalshi",)`, `SUPPORTED_COMPARATORS`, frozen `MarketQuote` (all fields per plan §2.1), `Opportunity`, `ExecutionResult`, `OpportunityStatus` FSM. Decimal auto-coercion + venue/fee-included/comparator guards. (2026-04-19)
+- [x] **P1-M0-T06.** `scripts/migrate_db.py` creates the 5 P1 tables (`kalshi_historical_markets`, `kalshi_historical_trades`, `kalshi_live_book_snapshots`, `reference_ticks`, `shadow_decisions`) on SQLite and Postgres (CLI + lib entry point). Idempotent via `IF NOT EXISTS`. `shadow_decisions` columns match P1-M4-T03 exactly. (2026-04-19)
+
+**Verification (2026-04-19):** `python3.11 -m pytest tests/ -q` → **29 passed**. `python3.11 scripts/migrate_db.py` → all 5 tables created under `data/kalshi.db`. Runtime-dep probe (`import kalshi_python_sync, websockets, pandas, pyarrow`) deferred until `pip install -e .` — no blocker for P1-M1 kickoff since it's the next step anyway.
 
 Verification:
 ```bash
@@ -180,23 +182,22 @@ python3.11 scripts/migrate_db.py
 
 ### KalshiMarketSource (read-only)
 
-- [ ] **P1-M1-T01.** Create `src/market/kalshi_market.py` with `KalshiMarketSource` stub (methods: `start`, `stop`, `get_quotes`, `is_healthy`).
-- [ ] **P1-M1-T02.** Wire `KalshiClient` from `kalshi_python_sync`. Read `KALSHI_API_KEY_ID` + PEM path from env. Validate: `client.get_balance()` on demo returns a balance.
-- [ ] **P1-M1-T03.** Implement `_discover_active_markets()` — `GET /markets?status=active` filtered to crypto-15M series. First verify exact series tickers via `GET /series?category=crypto` and log.
-- [ ] **P1-M1-T04.** Implement WS subscription to `wss://api.elections.kalshi.com/orderbook_delta` with signed handshake; subscribe to tickers from T03; maintain in-memory L1 + L2 book state.
-  - Verify: snapshot + ≥ 10 deltas in 60 s on a busy market.
-- [ ] **P1-M1-T05.** Map book state to `MarketQuote` with Kalshi-specific fields (execution plan §2.1). Prices → `Decimal` directly from dollar strings.
-- [ ] **P1-M1-T06.** Implement lifecycle tag (`opening | active | final_minute | closed | settled`) from `close_time` / `status` / `time_remaining_s`. 15-min boundary: unsubscribe settled, subscribe new.
-- [ ] **P1-M1-T07.** Failure modes: WS reconnect with exponential backoff via `RetryPolicy`; stale-book `warning_flags=("stale_book",)`; 429 token-bucket pacing.
-- [ ] **P1-M1-T08.** Write `tests/test_kalshi_market.py` — ≥ 15 assertions covering subscription, snapshot/delta parsing, lifecycle transitions, stale detection, reconnect.
+- [x] **P1-M1-T01.** `src/market/kalshi_market.py` — `KalshiMarketSource` with start/stop/get_quotes/is_healthy, `apply_snapshot`/`apply_delta`/`update_lifecycle` test seams. (2026-04-19)
+- [~] **P1-M1-T02.** `make_client()` builds `KalshiClient` from `KALSHI_API_KEY_ID` + PEM via lazy SDK import; factory seam unit-tested. **Blocker:** live `client.get_balance()` validation gated on P-02 (demo key).
+- [x] **P1-M1-T03.** `discover_active_crypto_markets()` queries `/series?category=crypto`, logs missing/surprising tickers against `EXPECTED_CRYPTO_SERIES`, pulls `/markets?status=active` per series. Mock-tested. (2026-04-19)
+- [~] **P1-M1-T04.** WS loop scaffolded with reconnect backoff + breaker integration + stop signaling. **Blocker:** actual handshake + orderbook_delta parsing require a demo key to exercise against `wss://api.elections.kalshi.com/`. Snapshot/delta application paths are test-covered.
+- [x] **P1-M1-T05.** `book_to_market_quote()` pure fn — asks derived (`1 − opposite_bid`), depth summed over top-N levels, all plan §2.1 fields populated, `fee_included=False` enforced. (2026-04-19)
+- [x] **P1-M1-T06.** `lifecycle_tag()` pure fn — `opening|active|final_minute|closed|settled` from status + `time_remaining_s`. Unknown statuses fail-open to `active`. (2026-04-19)
+- [x] **P1-M1-T07.** Stale-book detection → `warning_flags=("stale_book",)`; `CircuitBreaker` trips on repeated `record_api_error()`; `RetryPolicy` with exponential backoff wired into `_ws_loop`. 429 token-bucket pacing deferred to live-integration pass. (2026-04-19)
+- [x] **P1-M1-T08.** `tests/test_kalshi_market.py` — 29 tests / 50+ assertions covering parse/depth/mapping/lifecycle/env/discovery/snapshot/delta/stale/breaker. (2026-04-19)
 
 ### CryptoReferenceSource
 
-- [ ] **P1-M1-T09.** Create `src/market/crypto_reference.py` with `CryptoReferenceSource` Protocol + `BasketReferenceSource` class.
-- [ ] **P1-M1-T10.** Implement `BasketReferenceSource` per asset — subscribe to CF Benchmarks constituent exchanges (verify current list from `cfbenchmarks.com` methodology per asset; distinct for BTC / ETH / SOL). Aggregate per-second using CF's published methodology.
-- [ ] **P1-M1-T11.** Add `LicensedCFBenchmarksSource` stub, gated on `CF_BENCHMARKS_API_KEY`. No-op if blank.
-- [ ] **P1-M1-T12.** Persist every reference tick to `reference_ticks` (asset, ts_us, price, src).
-- [ ] **P1-M1-T13.** Write `tests/test_crypto_reference.py` — rolling-average math, outlier rejection, 60 s window edge cases.
+- [x] **P1-M1-T09.** `src/market/crypto_reference.py` — `CryptoReferenceSource` Protocol + `BasketReferenceSource` class with per-asset state, start/stop/is_healthy. (2026-04-19)
+- [x] **P1-M1-T10.** `BasketReferenceSource.record_tick()` ingests constituent ticks; `aggregate_basket()` = median after 1% outlier rejection; exchange constituents from `CF_CONSTITUENTS` table (flagged for verification against CF methodology PDFs before P2). Live exchange adapters deferred. (2026-04-19)
+- [x] **P1-M1-T11.** `LicensedCFBenchmarksSource` stub — no-op read surface, `is_licensed` flag on API-key presence. (2026-04-19)
+- [x] **P1-M1-T12.** `insert_tick()` + `insert_tick_postgres()` helpers write (asset, ts_us, price, src) to `reference_ticks`. (2026-04-19)
+- [x] **P1-M1-T13.** `tests/test_crypto_reference.py` — 19 tests covering outlier rejection, basket aggregation, 60s rolling-average window boundary math, source health, licensed-stub behavior, persistence roundtrip. (2026-04-19)
 
 Verification:
 ```bash

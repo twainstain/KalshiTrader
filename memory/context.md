@@ -1,7 +1,8 @@
 # KalshiTrader — Session Context
 
-**Last updated:** 2026-04-19
+**Last updated:** 2026-04-19 ~22:00 (2-hour bucket)
 **Purpose:** Orient a future session quickly. Not a substitute for the docs; complements them.
+**Previous snapshot:** [`context_20260419_2200.md`](./context_20260419_2200.md) (pre-implementation state before P1-M0 landed).
 
 ## What this project is
 
@@ -15,29 +16,50 @@ Kalshi crypto fair-value scanner. Research-grade tool that measures the timing l
 
 ## Status (2026-04-19)
 
-- **Pre-implementation.** Docs are complete; no `src/` code yet beyond this memory file.
-- Repo pivoted from prior DEX/Polymarket work. Local history reset to a fresh single root commit; pre-pivot state preserved at local tag `legacy-pre-kalshi` (not pushed).
-- Remote: `https://github.com/twainstain/KalshiTrader.git`.
+- **P1-M0 scaffolding: complete (6/6).** Repo shell bootstrap, `trading_platform` submodule, `pyproject.toml`, `.env.example`, `src/core/models.py`, `scripts/migrate_db.py`. Migration runs green; `data/kalshi.db` created.
+- **P1-M1 live data collection: code complete (11/13).** `KalshiMarketSource` with book→MarketQuote mapping, lifecycle tags, WS loop scaffold, `CircuitBreaker` / `RetryPolicy` wiring. `CryptoReferenceSource` Protocol + `BasketReferenceSource` with outlier rejection and 60s rolling average. `LicensedCFBenchmarksSource` stub. `reference_ticks` persistence helpers.
+- **Tests: 78/78 passing.** `tests/test_models.py` (15), `tests/test_platform_adapters.py` (7), `tests/test_migrate_db.py` (6), `tests/test_kalshi_market.py` (29), `tests/test_crypto_reference.py` (19+).
+- **Progress tracker:** 19/89 tasks complete — see `docs/kalshi_scanner_implementation_tasks.md`.
 
 ## Resolved architectural decisions
 
-- **A-01 Platform primitives:** `trading_platform` will be added as a git submodule at `lib/trading_platform/`. Upstream: `https://github.com/twainstain/trading-platform.git`. Access via a local `src/platform_adapters.py` (mirrors the prior DEX-bot pattern). No direct `trading_platform.*` imports from domain code.
-- **A-02 Repo shell bootstrap:** Start fresh. No selective restore from old history. `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, `scripts/migrate_db.py`, persistence layer, etc. get written fresh when P1-M0 begins.
+- **A-01 Platform primitives:** `trading_platform` added as submodule at `lib/trading_platform/` (commit `495b4c2`, head=`main`). All access goes through `src/platform_adapters.py` — no direct `trading_platform.*` imports in domain code.
+- **A-02 Repo shell bootstrap:** Start fresh. Working tree was clean with no `src/` / `tests/` / `scripts/` on disk — option (b) was the default-by-state. New Kalshi-focused code authored directly rather than reviving the prior DEX scaffolding.
 
-## Pending
+## Blocked on prerequisites (P-02 demo key)
 
-- **Prerequisites (P-01 → P-05):** user-side — KYC'd Kalshi account, demo API key pair at `demo.kalshi.co/account/profile`, Phase-1 budget committed, docs read. See `docs/kalshi_scanner_implementation_tasks.md` §5.
-- **Next concrete task:** P1-M0-T01 — execute A-02 (fresh `src/`, `tests/`, `scripts/`, `pyproject.toml`, `.env.example`, `docker-compose.yml`) + P1-M0-T02 (`git submodule add lib/trading_platform`).
+Two unit-test-covered tasks need a demo API key to exercise the live path:
 
-## Key references within the repo
+- **P1-M1-T02 live:** `client.get_balance()` sanity check on `demo-api.kalshi.co`. Code wired via `make_client()` with lazy SDK import.
+- **P1-M1-T04 live:** WS handshake against `wss://api.elections.kalshi.com/orderbook_delta`. Loop structure + reconnect backoff + breaker + stop signaling are in place; only the handshake + message parsing remain.
 
-- `CLAUDE.md` — repo-wide orientation + open decisions tracker.
-- `README.md` — project intro + doc pointers.
-- `docs/kalshi_crypto_fair_value_scanner_plan.md` — strategy & thesis (**read first for any question on "what" or "why"**).
-- `docs/kalshi_scanner_execution_plan.md` — architecture, platform conventions, milestone walkthrough (**read for "how" questions**).
-- `docs/kalshi_scanner_implementation_tasks.md` — status-tracked task list (P1-M0 → P2-M6). **Working doc during implementation; update statuses as tasks complete.**
-- `docs/crypto_arbitrage_feasibility_research.md` — broader landscape context (why Kalshi over alternatives).
-- `docs/prediction_market_arbitrage_video_breakdown_and_opinion.md` — failure-mode taxonomy.
+**Unblocks on:** user generates demo key at `demo.kalshi.co/account/profile`, saves PEM outside repo, populates `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` in `.env`.
+
+## Next concrete work
+
+1. **If P-02 resolved:** run `pip install -e ".[dev]"`, then `make_client().get_balance()` smoke, then run `_ws_loop` against demo to capture a live snapshot + ≥10 deltas (T04 live verification). Also unblocks all of P1-M2 (historical data pull needs auth for `/historical/markets`).
+2. **If P-02 not yet resolved, P1-M3 is independent:** fair-value model + backtest over replayed fixtures. Doesn't need any live connectivity. Entry points: `src/strategy/kalshi_fair_value.py` + `src/run_kalshi_backtest.py`.
+
+## Key files (reality, not plan)
+
+- `CLAUDE.md` — repo orientation. Has a stale "this is a research folder, no .py files" section; the "Implementation conventions" section supersedes it.
+- `pyproject.toml` — deps + pytest pythonpath wiring (`src`, `lib/trading_platform/src`, `scripts`).
+- `.env.example` — Kalshi keys + `DATABASE_URL`. User supplies `.env` (gitignored).
+- `src/core/models.py` — `MarketQuote` / `Opportunity` / `ExecutionResult` / `OpportunityStatus` + `SUPPORTED_VENUES`. Decimal-only, frozen, validated.
+- `src/platform_adapters.py` — Kalshi-flavored `CircuitBreaker` + `KalshiAPIError` + re-exports of `RetryPolicy`, `PriorityQueue`, etc.
+- `src/market/kalshi_market.py` — read-only feed. Pure helpers (`book_to_market_quote`, `lifecycle_tag`, `parse_dollar_string`, `book_depth_usd`) + `KalshiMarketSource` class + WS scaffold.
+- `src/market/crypto_reference.py` — `BasketReferenceSource` + `LicensedCFBenchmarksSource` + persistence helpers.
+- `scripts/migrate_db.py` — idempotent SQLite+Postgres migrations for all 5 P1 tables.
+- `tests/conftest.py` — adds `src/`, `lib/trading_platform/src/`, and `scripts/` to sys.path.
+
+## Critical guardrails (do not violate)
+
+- **Paper is default. Three explicit opt-ins for Phase-2 live:** `--execute` flag AND `KALSHI_API_KEY_ID` populated AND config `mode: "live"` + `dry_run: false`.
+- **Decimal, never float** for any financial field. `MarketQuote.__post_init__` auto-coerces and enforces.
+- **`fee_included=False`** on every Kalshi `MarketQuote` — the model raises `ValueError` if you try `True`.
+- **No direct `trading_platform.*` imports** in `src/` — route everything through `src/platform_adapters.py`.
+- **No `docker compose down -v`** on the postgres service — destroys `pg-data`.
+- **This repo only.** Implementation lives here; do not edit the sibling `/Users/tamir.wainstain/src/ArbitrageTrader/` (separate project).
 
 ## Kalshi API quick reference (extracted 2026-04-19)
 
@@ -49,17 +71,28 @@ Kalshi crypto fair-value scanner. Research-grade tool that measures the timing l
 - **Contract terms (authoritative):** `https://kalshi-public-docs.s3.amazonaws.com/contract_terms/CRYPTO15M.pdf` — Source Agency CF Benchmarks; 60 s simple-average at close; threshold-binary payouts; no-data → resolves No.
 - **Pricing conventions:** Prices in dollar strings (`"0.4200"` = $0.42); quantities fixed-point (`"13.00"`). Orderbook stores **only bids**; asks derived (`YES ask @ X = NO bid @ (1 − X)`).
 - **Rate limits:** per second — Basic 20r/10w → Prime 400r/400w. Writes = order-mutating endpoints only.
+- **Crypto series tickers (expected):** `KXBTC15M`, `KXETH15M`, `KXSOL15M`. Verified at runtime in `discover_active_crypto_markets()`.
 
-## Critical guardrails (do not violate)
+## Key references within the repo
 
-- **Paper is default. Three explicit opt-ins for Phase-2 live:** `--execute` flag AND `KALSHI_API_KEY_ID` populated AND config `mode: "live"` + `dry_run: false`.
-- **Decimal, never float** for any financial field.
-- **`fee_included=False`** on every Kalshi `MarketQuote`.
-- **No direct `trading_platform.*` imports** in `src/` once the submodule lands — route everything through `src/platform_adapters.py`.
-- **No `docker compose down -v`** on the postgres service — destroys `pg-data`.
-- **This repo only.** Implementation lives here; do not edit the sibling `/Users/tamir.wainstain/src/ArbitrageTrader/` (separate project).
+- `CLAUDE.md` — repo-wide orientation + open decisions tracker (decisions now resolved).
+- `README.md` — project intro + doc pointers (still stale per CLAUDE.md; will be rewritten post-Phase-1).
+- `docs/kalshi_crypto_fair_value_scanner_plan.md` — strategy & thesis (**read first for any question on "what" or "why"**).
+- `docs/kalshi_scanner_execution_plan.md` — architecture, platform conventions, milestone walkthrough (**read for "how" questions**).
+- `docs/kalshi_scanner_implementation_tasks.md` — status-tracked task list (P1-M0 → P2-M6). **Working doc during implementation; update statuses as tasks complete.**
+- `docs/crypto_arbitrage_feasibility_research.md` — broader landscape context (why Kalshi over alternatives).
+- `docs/prediction_market_arbitrage_video_breakdown_and_opinion.md` — failure-mode taxonomy.
+
+## Verification commands
+
+```bash
+python3.11 -m pytest tests/ -q           # expect 78 passed
+python3.11 scripts/migrate_db.py         # expect "sqlite migration complete: data/kalshi.db"
+# Once deps installed (pip install -e .[dev]) and P-02 resolved:
+python3.11 -c "import kalshi_python_sync, websockets, pandas, pyarrow; print('ok')"
+```
 
 ## Sibling repos (for reference only — do not edit from here)
 
 - `/Users/tamir.wainstain/src/ArbitrageTrader/` — the prior DEX-bot project. Unrelated now. Keep as reference for AT's `platform_adapters.py` patterns and test conventions when writing analogous Kalshi code.
-- `/Users/tamir.wainstain/src/trading-platform/` (if cloned locally) — the generic primitives used via submodule. Submodule URL: `https://github.com/twainstain/trading-platform.git`.
+- `/Users/tamir.wainstain/src/trading-platform/` (if cloned locally) — the generic primitives used via submodule at `lib/trading_platform/`. Upstream: `https://github.com/twainstain/trading-platform.git`.
