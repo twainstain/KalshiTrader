@@ -109,6 +109,21 @@ def test_basket_source_aggregates_across_constituents():
     assert src.get_spot("btc") == Decimal("65000")
 
 
+def test_basket_source_get_spot_falls_back_to_single_venue():
+    """Regression: `aggregate_basket` requires ≥2 venues; when only one
+    constituent has reported, `get_spot` must return that single venue's
+    latest price rather than None (the previous behavior broke the live
+    shadow runner where Coinbase is the only reference venue wired)."""
+    src = cr.BasketReferenceSource(assets=("btc",))
+    src.start()
+    src.record_tick(_tick("btc", 1, "65000", "coinbase"))
+    # With only one constituent, aggregate_basket returns None.
+    agg = cr.aggregate_basket({"coinbase": Decimal("65000")})
+    assert agg is None
+    # But get_spot must fall back to the single-venue latest price.
+    assert src.get_spot("btc") == Decimal("65000")
+
+
 def test_basket_source_drops_unsupported_asset_silently():
     src = cr.BasketReferenceSource(assets=("btc",))
     src.record_tick(_tick("doge", 1, "0.1", "coinbase"))

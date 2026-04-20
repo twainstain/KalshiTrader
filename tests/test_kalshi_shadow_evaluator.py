@@ -366,3 +366,124 @@ def test_run_loop_stops_on_stop_event(db):
         stop_event=stop,
     )
     assert totals["ticks"] == 0
+
+
+# ----------------------------------------------------------------------
+# Regression tests — bugs found during 2026-04-20 live run
+# ----------------------------------------------------------------------
+
+def test_shared_dict_regression_empty_init_does_not_create_fresh_dict(db):
+    """Regression: `x or {}` returns a NEW {} when `x` is empty-but-shared,
+    breaking the shared-reference contract that `LiveDataCoordinator` relies
+    on. Must use `{} if x is None else x` so later mutations by the caller
+    propagate into the evaluator's view.
+    """
+    conn, _ = db
+    shared_meta = {}
+    shared_asset_map = {}
+    market = MagicMock()
+    market.get_quotes.return_value = []
+    reference = MagicMock()
+    reference.get_spot.return_value = None
+    reference.get_60s_avg.return_value = None
+
+    ev = KalshiShadowEvaluator(
+        market_source=market, reference_source=reference,
+        strategy=KalshiFairValueStrategy(FairValueModel()),
+        market_meta_by_ticker=shared_meta,          # EMPTY dict passed in
+        asset_by_ticker=shared_asset_map,            # EMPTY dict passed in
+        conn=conn,
+    )
+    # Mutate from the CALLER side (simulating coord.discover()).
+    shared_meta["KX-X"] = {"asset": "btc"}
+    shared_asset_map["KX-X"] = "btc"
+    # The evaluator must see the mutation.
+    assert "KX-X" in ev._market_meta
+    assert "KX-X" in ev._asset_by_ticker
+    # And the identity should be the same dict (shared reference).
+    assert ev._market_meta is shared_meta
+    assert ev._asset_by_ticker is shared_asset_map
+
+
+def test_shared_dict_regression_none_substitutes_empty_dict(db):
+    """Paranoid: None input should substitute a fresh {}, not pass through."""
+    conn, _ = db
+    ev = KalshiShadowEvaluator(
+        market_source=MagicMock(), reference_source=MagicMock(),
+        strategy=KalshiFairValueStrategy(FairValueModel()),
+        market_meta_by_ticker=None,  # None → fresh {}
+        asset_by_ticker=None,
+        conn=conn,
+    )
+    assert ev._market_meta == {}
+    assert ev._asset_by_ticker == {}
+    assert ev._fee_bps == {}
+
+
+def test_shadow_config_default_gates_reject_final_minute():
+    """Regression: the default `build_evaluator` config must reject
+    time_remaining < 120s. Prior data showed 0% win rate there.
+    """
+    from run_kalshi_shadow import build_evaluator
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    # Apply the shadow_decisions schema (minimum needed).
+    conn.execute("""CREATE TABLE shadow_decisions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker TEXT, ts_us BIGINT,
+        p_yes TEXT, ci_width TEXT,
+        reference_price TEXT, reference_60s_avg TEXT, time_remaining_s TEXT,
+        best_yes_ask TEXT, best_no_ask TEXT,
+        book_depth_yes_usd TEXT, book_depth_no_usd TEXT,
+        recommended_side TEXT, hypothetical_fill_price TEXT,
+        hypothetical_size_contracts TEXT,
+        expected_edge_bps_after_fees TEXT, fee_bps_at_decision TEXT,
+        realized_outcome TEXT, realized_pnl_usd TEXT,
+        latency_ms_ref_to_decision TEXT, latency_ms_book_to_decision TEXT
+    )""")
+    ev, _ = build_evaluator(
+        conn=conn, is_postgres=False,
+        rest_client=MagicMock(),
+        reference_fetcher=lambda a: None,
+    )
+    cfg = ev._strategy.config
+    # Defaults calibrated from live-run findings:
+    lo, hi = cfg.time_window_seconds
+    assert lo >= 120, "final-minute window must be rejected by default"
+    assert hi <= 900, "window must not exceed 15 minutes"
+    # Edge floor comes from the same doc.
+    assert cfg.min_edge_bps_after_fees >= Decimal("300")
+
+
+def test_pnl_side_none_zero_even_on_win():
+    assert KalshiShadowEvaluator._compute_pnl(
+        outcome="yes", side="none",
+        fill_price=Decimal("0.42"), size=Decimal("10"),
+    ) == Decimal("0")
+
+
+def test_pnl_yes_win_with_low_fill_pays_big():
+    """The asymmetric-payoff finding: yes win at $0.05 pays $0.95."""
+    p = KalshiShadowEvaluator._compute_pnl(
+        outcome="yes", side="yes",
+        fill_price=Decimal("0.05"), size=Decimal("10"),
+    )
+    assert p == Decimal("9.5")
+
+
+def test_pnl_yes_loss_with_low_fill_loses_little():
+    p = KalshiShadowEvaluator._compute_pnl(
+        outcome="no", side="yes",
+        fill_price=Decimal("0.05"), size=Decimal("10"),
+    )
+    assert p == Decimal("-0.5")
+
+
+def test_pnl_no_side_no_data_resolves_as_no_win():
+    """no_data → resolves to No. Buying no at 0.4, no_data outcome, wins."""
+    p = KalshiShadowEvaluator._compute_pnl(
+        outcome="no_data", side="no",
+        fill_price=Decimal("0.4"), size=Decimal("10"),
+    )
+    # won (no side on a "no" outcome), pay = (1 - 0.4) * 10 = 6.0
+    assert p == Decimal("6.0")

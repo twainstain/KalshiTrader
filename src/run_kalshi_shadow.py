@@ -317,13 +317,18 @@ def build_evaluator(
     market_source = KalshiMarketSource(KalshiMarketConfig())
     reference_source = BasketReferenceSource(assets=tuple(set(ASSET_FROM_SERIES.values())))
     reference_source.start()
-    # Shadow-evaluator defaults: permissive CI gate and modest edge floor
-    # so we LOG every borderline decision. The P2 live executor will use
-    # the restrictive defaults from StrategyConfig() before real money.
+    # Shadow-evaluator defaults calibrated from
+    # docs/kalshi_shadow_live_capture_results.md (2026-04-20 live run):
+    #   • time_remaining < 60s: 0% win rate across all p_yes levels
+    #   • time_remaining 60-120s: 5.5% win rate (still unprofitable)
+    #   • time_remaining >=120s: break-even, >=300s: +$0.29/decision
+    #   • edge <300bps loses money; 300-1200bps is the sweet spot.
+    # So the scanner scores only the 120-900s window at ≥300bps edge.
     cfg = strategy_config or StrategyConfig(
-        min_edge_bps_after_fees=Decimal("50"),   # 0.5 pp — capture marginal too
-        max_ci_width=Decimal("1.0"),              # record everything
-        min_book_depth_usd=Decimal("50"),         # accept thin books for shadow
+        min_edge_bps_after_fees=Decimal("300"),   # below 300: negative EV per data
+        max_ci_width=Decimal("1.0"),               # still permissive on CI
+        min_book_depth_usd=Decimal("50"),
+        time_window_seconds=(120, 900),            # skip final 2 min (0% wins)
     )
     strategy = KalshiFairValueStrategy(FairValueModel(), cfg)
 
