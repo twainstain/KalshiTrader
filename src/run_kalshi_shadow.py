@@ -47,6 +47,7 @@ from execution.kalshi_shadow_evaluator import (  # noqa: E402
     KalshiShadowEvaluator,
     ShadowConfig,
 )
+from market.coinbase_ws import CoinbaseWSReference, make_ws_reference_fetcher  # noqa: E402
 from market.crypto_reference import BasketReferenceSource, ReferenceTick  # noqa: E402
 from market.kalshi_market import (  # noqa: E402
     KalshiMarketConfig,
@@ -405,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--dry-run", action="store_true",
                         help="Don't open a DB connection; skip persistence.")
+    parser.add_argument("--no-ws", action="store_true",
+                        help="Disable Coinbase WS; fall back to REST ticker polling.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -435,10 +438,26 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         conn, is_pg = open_connection(url)
 
+    # Coinbase WS for sub-second reference prices. Falls back to REST ticker
+    # when the WS cache is older than `staleness_threshold_us` (5s default).
+    # This addresses the "0% win rate at T<60s" finding from
+    # docs/kalshi_shadow_live_capture_results.md §6.
+    ws = None
+    fetcher = default_coinbase_fetcher
+    if not args.no_ws:
+        ws = CoinbaseWSReference(
+            assets=tuple(set(ASSET_FROM_SERIES.values())),
+        )
+        ws.start()
+        fetcher = make_ws_reference_fetcher(
+            ws, staleness_threshold_us=5_000_000,  # 5 seconds
+            rest_fallback=default_coinbase_fetcher,
+        )
+
     evaluator, coordinator = build_evaluator(
         conn=conn, is_postgres=is_pg,
         rest_client=rest_client,
-        reference_fetcher=default_coinbase_fetcher,
+        reference_fetcher=fetcher,
     )
     try:
         totals = run_loop(
@@ -448,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         logger.info("exit totals: %s", totals)
     finally:
+        if ws is not None:
+            ws.stop(timeout=5.0)
         if conn is not None:
             conn.close()
     return 0
