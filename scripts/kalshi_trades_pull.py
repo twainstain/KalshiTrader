@@ -54,9 +54,10 @@ def open_connection(url: str) -> sqlite3.Connection:
             path = Path(raw.lstrip("/"))
         else:
             path = Path(raw)
-        conn = sqlite3.connect(str(path), timeout=30.0)
+        conn = sqlite3.connect(str(path), timeout=60.0, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
     raise ValueError(f"sqlite URLs only: {url!r}")
 
