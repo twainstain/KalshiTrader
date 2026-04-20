@@ -11,17 +11,17 @@
 
 Expanded from 16 windows per asset → **110 windows per asset** by extending the trade-pull window from 4 hours to 30 hours. Result: **10-50× more events per asset** than before, giving reliable p99 tails for the first time.
 
-Headline — median Kalshi reprice latency after a ≥5 bps Coinbase move:
+Headline — median Kalshi reprice latency after a ≥5 bps Coinbase move (**all 7 assets complete**):
 
 | Asset | N events | p50 (ms) | p90 (ms) | p99 (ms) | Dir% |
 |---|---:|---:|---:|---:|---:|
-| **XRP** | 4,078 | **279** | 8,381 | 21,973 | 75% |
-| **DOGE** | 3,101 | **445** | 19,946 | 28,857 | 80% |
-| **ETH** | 8,673 | **475** | 8,245 | 25,805 | 72% |
+| **BTC** | 4,831 | **106** | 2,606 | 9,224 | 72% |
+| **XRP** | 4,057 | **281** | 8,642 | 21,973 | 75% |
+| **DOGE** | 3,070 | **467** | 20,472 | 28,857 | 80% |
+| **ETH** | 8,639 | **480** | 8,318 | 25,810 | 72% |
 | **SOL** | 2,348 | **479** | 10,147 | 21,110 | 78% |
-| **HYPE** | 1,300 | **622** | 13,872 | 25,586 | 81% |
+| **HYPE** | 1,295 | **622** | 13,882 | 25,586 | 81% |
 | **BNB** | 198 | **1,362** | 21,341 | 26,344 | 69% |
-| BTC | _pending — pull incomplete_ | | | | |
 
 (See §2 for threshold sweeps, §3 for interpretation.)
 
@@ -34,19 +34,18 @@ For each asset:
 3. Identified **Kalshi reprice events** (yes-price changes ≥ 1 tick) and **Coinbase move events** (price deviates ≥ N bps from 2s rolling mean).
 4. For each Coinbase move, measured `Δt` to next Kalshi reprice (capped at 30 s), plus directional match.
 
-**Data sizes:**
+**Data sizes (all 7 assets complete, 30-hour window):**
 
 | Asset | Coinbase trades | Kalshi trades | # windows |
 |---|---:|---:|---:|
-| BTC | 17,454† | 536,499 | 109 |
-| ETH | 459,447 | 76,997 | 109 |
-| SOL | 122,158 | 30,440 | 109 |
-| XRP | 221,641 | 31,292 | 109 |
-| DOGE | 48,353 | 19,488 | 109 |
-| BNB | 7,266 | 17,531 | 109 |
-| HYPE | 19,827 | 26,842 | 109 |
-
-†BTC Coinbase trade pull is still running in the background — 30h of BTC data requires walking back through ~3M trades, bottlenecked by Coinbase's 10 req/s public rate limit. ETH completed (460k trades). **Analysis is complete for 6 of 7 assets**; BTC section remains provisional on the earlier 4-hour sample until its 30h pull completes.
+| BTC | 849,747 | 525,786 | 107 |
+| ETH | 454,869 | 75,146 | 107 |
+| SOL | 122,158 | 29,791 | 107 |
+| XRP | 218,710 | 30,569 | 107 |
+| DOGE | 47,504 | 19,180 | 107 |
+| BNB | 7,173 | 17,301 | 107 |
+| HYPE | 19,679 | 26,373 | 107 |
+| **Total** | **1,919,840** | **724,146** | **749** |
 
 ## 2. Full percentile tables
 
@@ -132,27 +131,39 @@ N=109 windows, 459k Coinbase + 77k Kalshi trades.
 
 **Standout:** ETH at ≥10 bps drops to a sub-120 ms median. ETH has MM activity but the median at ≥5 bps (475 ms) is elevated relative to XRP (279 ms) — likely the MM is present but less tight.
 
-### 2.7 BTC — pull incomplete
+### 2.7 BTC
 
-Analysis pending. Current coverage: 17,454 Coinbase trades out of ~3M needed for a 30h window. BTC background pull running.
+N=107 windows, 850k Coinbase + 526k Kalshi trades — the densest Kalshi market in the set.
 
-As of the prior 4-hour sample (`kalshi_feed_lag_cross_asset_report.md`):
-- N=193 events at ≥5 bps
-- p50 = 36 ms (colocated-MM regime)
+| Thresh | N events | Dir% | p10 | p25 | p50 | p75 | p90 | p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ≥ 2 bps | 44,038 | 73% | 13 | 33 | 149 | 507 | 1,550 | 10,003 |
+| ≥ 5 bps | 4,831 | 72% | 12 | 33 | **106** | 345 | 2,606 | 9,224 |
+| ≥ 10 bps | 394 | 55% | 11 | 31 | **76** | 194 | 6,148 | 6,571 |
+| ≥ 20 bps | 0 | — | — | — | — | — | — | — |
 
-When the 30h BTC pull completes, we expect the all-hours BTC median to be higher than 36 ms (as with other assets, overnight hours soften the MM cadence) — likely landing in the 100-400 ms range based on other-asset patterns.
+**Standout — BTC is the fastest asset across the board:**
+
+- p50 at ≥5 bps = **106 ms** vs runner-up XRP at 281 ms.
+- p50 at ≥10 bps = **76 ms** — tightest median in the set; even the "only 107 ms" from the earlier 4h sample held up when averaged over 30h.
+- p10 = 12 ms (≥5 bps) means in 10% of cases the book repriced in under 13 ms — colocated-MM territory.
+- The 4h sample's 36 ms median is the "busy-regime" case; 106 ms is the all-hours median.
+- Directional match drops to 55% at ≥10 bps — surprising; possibly a noise artifact at the threshold (price momentarily touching 10 bps mean-reverts before a Kalshi reprice).
+- No ≥20 bps events in the 30h window — BTC simply didn't move that much relative to its 2-second baseline during this period.
 
 ## 3. What changed vs. the 4-hour sample
 
 | Asset | 4h sample p50 (≥5 bps) | 30h sample p50 (≥5 bps) | Delta |
 |---|---:|---:|---:|
-| BTC | 36 ms | _pending_ | — |
-| ETH | 96 ms | **475 ms** | 5× slower |
+| BTC | 36 ms | **106 ms** | 3× slower (all-hours) |
+| ETH | 96 ms | **480 ms** | 5× slower |
 | SOL | 39 ms | **479 ms** | 12× slower |
-| DOGE | 16 ms | **445 ms** | 28× slower |
-| XRP | 314 ms | 279 ms | ≈ same |
+| DOGE | 16 ms | **467 ms** | 29× slower |
+| XRP | 314 ms | 281 ms | ≈ same |
 | HYPE | 4,172 ms | **622 ms** | 7× faster |
 | BNB | insufficient | 1,362 ms | — |
+
+**BTC holds its crown as the fastest asset** — 3× slower than the busy-regime 4h sample, but still the tightest MM competition in the set. The BTC/runner-up gap is ~2.7× (BTC 106 ms vs XRP 281 ms).
 
 **Interpretation:** the 4-hour sample was from a PARTICULARLY ACTIVE market period — lots of trading, tight MM spreads, fast reprices. The 30-hour sample includes overnight + slower periods where MM cadence drops off dramatically. **The cross-asset ordering flipped** for SOL, DOGE, and HYPE:
 
@@ -167,19 +178,20 @@ When the 30h BTC pull completes, we expect the all-hours BTC median to be higher
 ### ≥ 5 bps — the "tradeable signal" threshold
 
 ```
-XRP   279 ms  ← fastest
-DOGE  445 ms
-ETH   475 ms
+BTC   106 ms  ← fastest (tight MM competition)
+XRP   281 ms
+DOGE  467 ms
+ETH   480 ms
 SOL   479 ms
 HYPE  622 ms
 BNB  1362 ms  ← slowest
-BTC   pending (expected 100-400 ms from extrapolation)
 ```
 
 ### ≥ 10 bps — large move regime
 
 ```
-ETH   113 ms  ← new winner
+BTC    76 ms  ← fastest
+ETH   113 ms
 XRP   160 ms  ← tight cluster at 160 ms
 HYPE  336 ms
 SOL   331 ms
@@ -195,7 +207,8 @@ XRP   160 ms
 HYPE  183 ms
 DOGE  210 ms
 ETH   5893 ms†
-BNB   insufficient
+BTC     —     (no ≥20 bps moves in 30h window — BTC was relatively calm)
+BNB     —     insufficient
 ```
 
 †ETH's ≥20 bps bucket contains 23 events all at the same Δt, suggesting a single pathological window. Small sample; don't generalize.
@@ -206,12 +219,15 @@ Using the ≥5 bps threshold as the "tradable signal" floor.
 
 | Asset | p10 | p50 | p90 | Solo op at 100 ms latency |
 |---|---:|---:|---:|---|
-| XRP | 14 ms | 279 | 8,381 | Competes on ~50% of signals |
-| DOGE | 15 ms | 445 | 19,946 | Competes on ~55% of signals |
-| ETH | 17 ms | 475 | 8,245 | Competes on ~55% of signals |
+| BTC | **12 ms** | **106** | 2,606 | Competes on ~45% of signals; MMs race at p25=33ms |
+| XRP | 14 ms | 281 | 8,642 | Competes on ~50% of signals |
+| DOGE | 14 ms | 467 | 20,472 | Competes on ~55% of signals |
+| ETH | 17 ms | 480 | 8,318 | Competes on ~55% of signals |
 | SOL | 16 ms | 479 | 10,147 | Competes on ~55% of signals |
-| HYPE | 18 ms | 622 | 13,872 | Competes on ~60% of signals |
+| HYPE | 18 ms | 622 | 13,882 | Competes on ~60% of signals |
 | BNB | 14 ms | 1,362 | 21,341 | Competes on ~80% of signals, but capacity is thin |
+
+**Observation: BTC is harder to trade against at retail latency.** At 100 ms operator latency, only ~45% of BTC signals have Kalshi still un-repriced. For XRP/ETH/SOL/DOGE, ~50-55% of signals are beatable. For BNB, 80% — but book depth is the binding constraint.
 
 An operator with 100 ms end-to-end latency beats Kalshi's reprice on whatever fraction of events has `Δt > 100 ms`. For DOGE / SOL / HYPE / BNB, this is ~50-80% of the distribution — a tractable retail edge if the directional read is clean.
 
