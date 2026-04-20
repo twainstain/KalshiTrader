@@ -42,12 +42,20 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         close_ts      BIGINT NOT NULL,
         expiration_ts BIGINT NOT NULL,
         settled_result TEXT,
+        settlement_ts BIGINT,
+        expiration_value TEXT,
+        last_price    TEXT,
         volume        TEXT,
         raw_json      TEXT NOT NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_khm_series ON kalshi_historical_markets (series_ticker)",
     "CREATE INDEX IF NOT EXISTS idx_khm_expiration ON kalshi_historical_markets (expiration_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_khm_close_ts ON kalshi_historical_markets (close_ts)",
+    # Idempotent column adds — SQLite raises if column already exists, so
+    # wrap each in an expression SQL_ALTER_SAFE below. We still declare the
+    # target set here so a fresh DB gets the latest shape from the CREATE.
+    # For already-migrated DBs, run_safe_alters() handles the add.
 
     """
     CREATE TABLE IF NOT EXISTS kalshi_historical_trades (
@@ -147,6 +155,27 @@ def _translate_for_postgres(stmt: str) -> str:
     )
 
 
+# ALTER statements run separately — they may already have been applied on a
+# previous migration and SQLite's `ADD COLUMN` isn't natively idempotent.
+SAFE_ALTER_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE kalshi_historical_markets ADD COLUMN settlement_ts BIGINT",
+    "ALTER TABLE kalshi_historical_markets ADD COLUMN expiration_value TEXT",
+    "ALTER TABLE kalshi_historical_markets ADD COLUMN last_price TEXT",
+)
+
+
+def _run_safe_alters(executor) -> None:
+    """Apply each ALTER, swallowing duplicate-column errors."""
+    for stmt in SAFE_ALTER_STATEMENTS:
+        try:
+            executor(stmt)
+        except Exception as e:  # noqa: BLE001 — idempotent by design
+            msg = str(e).lower()
+            if "duplicate column" in msg or "already exists" in msg:
+                continue
+            raise
+
+
 def migrate(url: str) -> None:
     """Apply all schema statements against the DB at `url`.
 
@@ -171,6 +200,7 @@ def migrate(url: str) -> None:
         try:
             for stmt in SCHEMA_STATEMENTS:
                 conn.execute(_translate_for_sqlite(stmt))
+            _run_safe_alters(conn.execute)
             conn.commit()
         finally:
             conn.close()
@@ -185,6 +215,7 @@ def migrate(url: str) -> None:
             with conn.cursor() as cur:
                 for stmt in SCHEMA_STATEMENTS:
                     cur.execute(_translate_for_postgres(stmt))
+                _run_safe_alters(lambda s: cur.execute(_translate_for_postgres(s)))
             conn.commit()
         finally:
             conn.close()

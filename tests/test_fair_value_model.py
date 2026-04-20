@@ -1,7 +1,8 @@
-"""Cover `src/strategy/kalshi_fair_value.py` — FairValueModel (P1-M3-T07)."""
+"""Cover the refactored `FairValueModel` — up/down single-parameter model."""
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 
 import pytest
@@ -15,222 +16,251 @@ def test_norm_cdf_at_zero_is_half():
     assert abs(fv._norm_cdf(Decimal("0")) - Decimal("0.5")) < Decimal("1e-9")
 
 
-def test_norm_cdf_tails_converge():
+def test_norm_cdf_tails():
     assert fv._norm_cdf(Decimal("5")) > Decimal("0.99999")
     assert fv._norm_cdf(Decimal("-5")) < Decimal("0.00001")
 
 
-def test_prob_above_strike_degenerate_zero_sigma():
-    # T = 0 → no uncertainty. Pure comparison.
-    assert fv.prob_above_strike(
-        spot=Decimal("66000"), strike=Decimal("65000"), sigma_over_horizon=Decimal("0"),
-    ) == Decimal("1")
-    assert fv.prob_above_strike(
-        spot=Decimal("64000"), strike=Decimal("65000"), sigma_over_horizon=Decimal("0"),
-    ) == Decimal("0")
+def test_sigma_over_horizon_scales_sqrt_time():
+    s = Decimal("0.002")
+    # Full window → full σ.
+    assert fv.sigma_over_horizon(s, fv.WINDOW_SECONDS) == s
+    # Quarter window → σ · 0.5.
+    q = fv.sigma_over_horizon(s, fv.WINDOW_SECONDS / Decimal("4"))
+    assert abs(q - s * Decimal("0.5")) < Decimal("1e-9")
+    # Zero time → zero σ.
+    assert fv.sigma_over_horizon(s, Decimal("0")) == Decimal("0")
 
 
-def test_prob_above_strike_monotonic_in_spot():
-    sigma = Decimal("0.01")
-    k = Decimal("65000")
-    p_low = fv.prob_above_strike(spot=Decimal("64000"), strike=k, sigma_over_horizon=sigma)
-    p_at = fv.prob_above_strike(spot=Decimal("65000"), strike=k, sigma_over_horizon=sigma)
-    p_high = fv.prob_above_strike(spot=Decimal("66000"), strike=k, sigma_over_horizon=sigma)
-    assert p_low < p_at < p_high
+def test_sigma_over_horizon_saturates_at_full_window():
+    s = Decimal("0.005")
+    # Asking for T > window returns the full σ.
+    assert fv.sigma_over_horizon(s, Decimal("1800")) == s
 
 
-def test_prob_above_strike_at_spot_equals_strike_near_half():
-    # At S=K, p = Φ(-σ/2) — slightly below 0.5 but close.
-    p = fv.prob_above_strike(
-        spot=Decimal("65000"), strike=Decimal("65000"),
-        sigma_over_horizon=Decimal("0.02"),
+def test_prob_return_nonneg_sign_behavior():
+    sigma = Decimal("0.002")
+    # Positive observed → prob > 0.5.
+    assert fv.prob_return_nonneg(
+        log_return_observed=Decimal("0.001"), sigma_remaining=sigma,
+    ) > Decimal("0.5")
+    # Negative observed → prob < 0.5.
+    assert fv.prob_return_nonneg(
+        log_return_observed=Decimal("-0.001"), sigma_remaining=sigma,
+    ) < Decimal("0.5")
+    # Zero observed → prob = 0.5.
+    p0 = fv.prob_return_nonneg(
+        log_return_observed=Decimal("0"), sigma_remaining=sigma,
     )
-    assert Decimal("0.4") < p < Decimal("0.5")
+    assert abs(p0 - Decimal("0.5")) < Decimal("1e-9")
 
 
-def test_annual_vol_to_horizon_scales_sqrt_time():
-    year = fv.SECONDS_PER_YEAR
-    # Horizon = 1 year → sigma · √1 = sigma.
-    assert fv.annual_vol_to_horizon(Decimal("0.60"), year) == Decimal("0.60")
-    # Horizon = 1/4 year → sigma · √0.25 = sigma · 0.5.
-    q = fv.annual_vol_to_horizon(Decimal("0.60"), year / Decimal("4"))
-    assert abs(q - Decimal("0.30")) < Decimal("1e-9")
-
-
-def test_annual_vol_to_horizon_zero_returns_zero():
-    assert fv.annual_vol_to_horizon(Decimal("0.60"), Decimal("0")) == Decimal("0")
+def test_prob_return_nonneg_degenerate_zero_sigma():
+    # At σ=0 (no time left), pure comparison wins.
+    assert fv.prob_return_nonneg(
+        log_return_observed=Decimal("0.0001"), sigma_remaining=Decimal("0"),
+    ) == Decimal("1")
+    assert fv.prob_return_nonneg(
+        log_return_observed=Decimal("-0.0001"), sigma_remaining=Decimal("0"),
+    ) == Decimal("0")
 
 
 # --------- FairValueModel.price ---------
 
-def _model() -> fv.FairValueModel:
+def _mk_model(**kw):
     return fv.FairValueModel(
-        annual_vol_by_asset={"btc": Decimal("0.60")},
-        no_data_haircut=Decimal("0"),  # tests below add it explicitly
+        sigma_15min_by_asset={"btc": Decimal("0.002"), "eth": Decimal("0.003")},
+        no_data_haircut=kw.pop("no_data_haircut", Decimal("0")),
+        **kw,
     )
 
 
-def test_price_above_with_spot_far_above_strike_gives_high_p_yes():
-    m = _model()
-    p, ci = m.price(
-        asset="btc", strike=Decimal("60000"), comparator="above",
-        reference_price=Decimal("70000"), reference_60s_avg=Decimal("70000"),
-        time_remaining_s=Decimal("300"),
+def test_price_above_spot_far_above_strike_gives_high_p_yes():
+    m = _mk_model()
+    p, _ = m.price(
+        asset="btc", strike=Decimal("65000"), comparator="at_least",
+        reference_price=Decimal("66000"),    # ~154 bps above
+        reference_60s_avg=Decimal("66000"),
+        time_remaining_s=Decimal("30"),
     )
     assert p > Decimal("0.95")
-    assert Decimal("0") <= ci <= Decimal("1")
 
 
-def test_price_above_with_spot_far_below_strike_gives_low_p_yes():
-    m = _model()
+def test_price_above_spot_far_below_strike_gives_low_p_yes():
+    m = _mk_model()
     p, _ = m.price(
-        asset="btc", strike=Decimal("70000"), comparator="above",
-        reference_price=Decimal("60000"), reference_60s_avg=Decimal("60000"),
-        time_remaining_s=Decimal("300"),
+        asset="btc", strike=Decimal("66000"), comparator="at_least",
+        reference_price=Decimal("65000"),
+        reference_60s_avg=Decimal("65000"),
+        time_remaining_s=Decimal("30"),
     )
     assert p < Decimal("0.05")
 
 
+def test_price_equal_strike_and_spot_yields_half():
+    m = _mk_model()
+    p, _ = m.price(
+        asset="btc", strike=Decimal("65000"), comparator="at_least",
+        reference_price=Decimal("65000"),
+        reference_60s_avg=Decimal("65000"),
+        time_remaining_s=Decimal("300"),
+    )
+    assert abs(p - Decimal("0.5")) < Decimal("0.01")
+
+
 def test_price_below_is_complement_of_above():
-    m = _model()
+    m = _mk_model()
     spot = Decimal("65500")
     k = Decimal("65000")
     p_above, _ = m.price(
-        asset="btc", strike=k, comparator="above",
+        asset="btc", strike=k, comparator="at_least",
         reference_price=spot, reference_60s_avg=spot,
-        time_remaining_s=Decimal("120"),
+        time_remaining_s=Decimal("60"),
     )
     p_below, _ = m.price(
         asset="btc", strike=k, comparator="below",
         reference_price=spot, reference_60s_avg=spot,
-        time_remaining_s=Decimal("120"),
+        time_remaining_s=Decimal("60"),
     )
-    # Sum must equal 1 (no haircut in this model).
     assert abs((p_above + p_below) - Decimal("1")) < Decimal("1e-9")
 
 
-def test_price_at_least_matches_above():
-    m = _model()
-    p_a, _ = m.price(
-        asset="btc", strike=Decimal("65000"), comparator="above",
-        reference_price=Decimal("65200"), reference_60s_avg=Decimal("65000"),
-        time_remaining_s=Decimal("200"),
-    )
+def test_price_at_least_matches_above_and_greater_or_equal():
+    m = _mk_model()
     p_al, _ = m.price(
         asset="btc", strike=Decimal("65000"), comparator="at_least",
-        reference_price=Decimal("65200"), reference_60s_avg=Decimal("65000"),
-        time_remaining_s=Decimal("200"),
+        reference_price=Decimal("65100"),
+        reference_60s_avg=Decimal("65000"),
+        time_remaining_s=Decimal("60"),
     )
-    assert p_a == p_al
+    p_ge, _ = m.price(
+        asset="btc", strike=Decimal("65000"), comparator="greater_or_equal",
+        reference_price=Decimal("65100"),
+        reference_60s_avg=Decimal("65000"),
+        time_remaining_s=Decimal("60"),
+    )
+    assert p_al == p_ge
 
 
 def test_price_between_and_exactly_raise_not_implemented():
-    m = _model()
+    m = _mk_model()
     for comp in ("between", "exactly"):
         with pytest.raises(NotImplementedError, match="strike_high"):
             m.price(
                 asset="btc", strike=Decimal("65000"), comparator=comp,
                 reference_price=Decimal("65000"),
                 reference_60s_avg=Decimal("65000"),
-                time_remaining_s=Decimal("300"),
+                time_remaining_s=Decimal("60"),
             )
 
 
 def test_price_unsupported_comparator_raises_value_error():
-    m = _model()
+    m = _mk_model()
     with pytest.raises(ValueError, match="unsupported comparator"):
         m.price(
             asset="btc", strike=Decimal("65000"), comparator="bogus",
             reference_price=Decimal("65000"),
             reference_60s_avg=Decimal("65000"),
-            time_remaining_s=Decimal("300"),
+            time_remaining_s=Decimal("60"),
         )
 
 
-def test_price_partial_window_pulls_toward_observed_avg():
-    m = _model()
-    # With tr=30 and an observed avg far from spot, the blend should move
-    # p_yes more than if we only used spot.
-    p_with_obs_above, _ = m.price(
-        asset="btc", strike=Decimal("65000"), comparator="above",
-        reference_price=Decimal("65100"),         # spot near strike
-        reference_60s_avg=Decimal("65400"),       # observed already above
-        time_remaining_s=Decimal("30"),
-    )
-    p_with_obs_below, _ = m.price(
-        asset="btc", strike=Decimal("65000"), comparator="above",
-        reference_price=Decimal("65100"),
-        reference_60s_avg=Decimal("64700"),       # observed already below
-        time_remaining_s=Decimal("30"),
-    )
-    assert p_with_obs_above > p_with_obs_below
-
-
 def test_price_t_zero_is_degenerate():
-    m = _model()
-    p_yes, ci = m.price(
-        asset="btc", strike=Decimal("65000"), comparator="above",
+    m = _mk_model()
+    # Any positive spot above strike at T=0 → yes. Below → no.
+    p_up, _ = m.price(
+        asset="btc", strike=Decimal("65000"), comparator="at_least",
         reference_price=Decimal("65100"),
-        reference_60s_avg=Decimal("65500"),       # resolution value
+        reference_60s_avg=Decimal("65100"),
         time_remaining_s=Decimal("0"),
     )
-    assert p_yes == Decimal("1")
-    # No uncertainty at expiry — CI collapses.
-    assert ci == Decimal("0")
+    assert p_up == Decimal("1")
+    p_dn, _ = m.price(
+        asset="btc", strike=Decimal("65100"), comparator="at_least",
+        reference_price=Decimal("65000"),
+        reference_60s_avg=Decimal("65000"),
+        time_remaining_s=Decimal("0"),
+    )
+    assert p_dn == Decimal("0")
 
 
 def test_no_data_haircut_subtracts_exactly():
     m = fv.FairValueModel(
-        annual_vol_by_asset={"btc": Decimal("0.6")},
+        sigma_15min_by_asset={"btc": Decimal("0.002")},
         no_data_haircut=Decimal("0.01"),
     )
+    # spot far above strike → raw p ~ 1; with 1 pp haircut → ~0.99.
     p, _ = m.price(
-        asset="btc", strike=Decimal("60000"), comparator="above",
+        asset="btc", strike=Decimal("65000"), comparator="at_least",
         reference_price=Decimal("70000"),
         reference_60s_avg=Decimal("70000"),
-        time_remaining_s=Decimal("300"),
+        time_remaining_s=Decimal("30"),
     )
-    # Without haircut p would be ~1; with haircut it's ~0.99.
     assert p <= Decimal("0.99")
     assert p > Decimal("0.95")
 
 
 def test_no_data_haircut_clamps_at_zero():
-    m = fv.FairValueModel(no_data_haircut=Decimal("0.3"))  # larger than p
+    m = fv.FairValueModel(
+        sigma_15min_by_asset={"btc": Decimal("0.002")},
+        no_data_haircut=Decimal("0.5"),   # larger than raw p
+    )
     p, _ = m.price(
-        asset="btc", strike=Decimal("70000"), comparator="above",
+        asset="btc", strike=Decimal("70000"), comparator="at_least",
         reference_price=Decimal("60000"),
         reference_60s_avg=Decimal("60000"),
-        time_remaining_s=Decimal("300"),
+        time_remaining_s=Decimal("30"),
     )
     assert p >= Decimal("0")
 
 
-def test_ci_width_narrows_as_time_remaining_drops():
-    m = _model()
-    wide = m.price(
-        asset="btc", strike=Decimal("65000"), comparator="above",
-        reference_price=Decimal("65100"),
-        reference_60s_avg=Decimal("65100"),
-        time_remaining_s=Decimal("600"),
-    )[1]
-    narrow = m.price(
-        asset="btc", strike=Decimal("65000"), comparator="above",
-        reference_price=Decimal("65100"),
-        reference_60s_avg=Decimal("65100"),
-        time_remaining_s=Decimal("2"),
-    )[1]
-    assert narrow < wide
+def test_ci_width_near_zero_when_p_confident():
+    m = _mk_model()
+    _, ci = m.price(
+        asset="btc", strike=Decimal("65000"), comparator="at_least",
+        reference_price=Decimal("70000"),   # way above → p ~ 1
+        reference_60s_avg=Decimal("70000"),
+        time_remaining_s=Decimal("30"),
+    )
+    assert ci < Decimal("0.01")
+
+
+def test_ci_width_near_one_at_coin_flip():
+    m = _mk_model()
+    _, ci = m.price(
+        asset="btc", strike=Decimal("65000"), comparator="at_least",
+        reference_price=Decimal("65000"),
+        reference_60s_avg=Decimal("65000"),
+        time_remaining_s=Decimal("600"),   # long time, spot = strike
+    )
+    assert ci > Decimal("0.95")
 
 
 def test_unknown_asset_falls_back_to_default():
-    m = fv.FairValueModel()
+    # No explicit override; falls back to DEFAULT_SIGMA_15MIN['btc'].
+    m = fv.FairValueModel(no_data_haircut=Decimal("0"))
     p, _ = m.price(
-        asset="doge", strike=Decimal("65000"), comparator="above",
-        reference_price=Decimal("70000"),
-        reference_60s_avg=Decimal("70000"),
-        time_remaining_s=Decimal("300"),
+        asset="doge", strike=Decimal("65000"), comparator="at_least",
+        reference_price=Decimal("65100"),
+        reference_60s_avg=Decimal("65100"),
+        time_remaining_s=Decimal("60"),
     )
-    # Default (0.60) used internally — the call doesn't raise and we get
-    # a reasonable answer.
     assert Decimal("0") < p <= Decimal("1")
+
+
+def test_calibrate_from_returns_updates_sigma():
+    m = fv.FairValueModel()
+    sigma = m.calibrate_from_returns(asset="btc", returns=[
+        Decimal("0.001"), Decimal("-0.002"), Decimal("0.0015"),
+        Decimal("-0.0005"), Decimal("0"),
+    ])
+    assert sigma > 0
+    # Subsequent price() picks up the new σ.
+    assert m._sigma("btc") == sigma
+
+
+def test_calibrate_from_empty_returns_is_noop():
+    m = fv.FairValueModel(sigma_15min_by_asset={"btc": Decimal("0.002")})
+    sigma = m.calibrate_from_returns(asset="btc", returns=[])
+    # Nothing to fit → keeps existing value.
+    assert sigma == Decimal("0.002")
