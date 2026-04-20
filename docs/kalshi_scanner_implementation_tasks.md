@@ -2,7 +2,7 @@
 
 **Research date:** 2026-04-19
 **Structure:** Two phases — Phase 1 (Scanner / Feasibility Research, zero money at risk) → Phase 1→2 Gate → Phase 2 (Execution, real money).
-**Status:** P1-M0 + P1-M1 code + P1-M3 code complete (2026-04-20). T02-live verified (`get_balance()` returns on demo). P1-M1-T04-live WS handshake + P1-M2 historical pull still pending. 117 tests passing.
+**Status:** P1-M0 + P1-M1 code + P1-M3 code + P1-M2 historical-pull / reference-daemon code complete (2026-04-20). Live verified: `get_balance()` (demo), 7,159 BTC markets pulled in 7s, Coinbase reference ticks flowing into SQLite. 150 tests passing. **Gap:** backtest needs `reference_ticks` history aligned with past market settlements — either run the daemon forward-looking for hours or add a Coinbase historical-candle puller.
 **Companion docs:** [`kalshi_crypto_fair_value_scanner_plan.md`](./kalshi_crypto_fair_value_scanner_plan.md) (strategy), [`kalshi_scanner_execution_plan.md`](./kalshi_scanner_execution_plan.md) (architecture / how-to).
 **Repo:** `/Users/tamir.wainstain/src/KalshiTrader/` — everything (docs + code + tests + configs + deploy) lives here. All paths below are relative to this repo unless prefixed.
 
@@ -30,7 +30,7 @@
 | — | Prerequisites | not started | 0 / 5 |
 | P1 | M0 Repo prep | **complete** | **6 / 6** |
 | P1 | M1 Live data collection | **code complete (1 live-gated)** | **12 / 13** |
-| P1 | M2 Historical data collection | not started | 0 / 6 |
+| P1 | M2 Historical data collection | **code complete (T03/T06 pending)** | **4 / 6** |
 | P1 | M3 Fair-value model + backtest | **code complete (T08 data-gated)** | **7 / 8** |
 | P1 | M4 Live shadow evaluator | not started | 0 / 7 |
 | P1 | M5 Feasibility analysis + report | not started | 0 / 5 |
@@ -42,7 +42,7 @@
 | P2 | M5 Live small size (2 weeks) | not started | 0 / 5 |
 | P2 | M6 Scale | not started | 0 / 4 |
 | — | Cross-cutting | not started | 0 / 4 |
-| **Total** | | **in progress** | **27 / 89** |
+| **Total** | | **in progress** | **31 / 89** |
 
 ## 3. Kalshi API reference card (source of truth)
 
@@ -206,12 +206,12 @@ python3.11 -m pytest tests/test_kalshi_market.py tests/test_crypto_reference.py 
 
 ## P1-M2 — Historical data collection (2–3 days)
 
-- [ ] **P1-M2-T01.** Create `scripts/kalshi_historical_pull.py` — CLI pulling past N days of crypto 15M markets via `GET /historical/markets` (cursor pagination). Params: `--days N --asset {btc,eth,sol,all} --db-url`.
-- [ ] **P1-M2-T02.** Extend the script to pull `GET /historical/trades` for discovered market tickers — every fill with ts / price / qty / taker side.
-- [ ] **P1-M2-T03.** Pull candlesticks via `GET /markets/{ticker}/candlesticks?period_interval=1` (1 min) per window — for book / midpoint cross-check.
-- [ ] **P1-M2-T04.** Stand up continuous basket-proxy capture daemon (systemd unit or EC2 cron). Must run for the full Phase-1 shadow-evaluator window so historical-vs-realtime comparison has aligned coverage. Writes to `reference_ticks`.
-- [ ] **P1-M2-T05.** Confirm the P1-M0-T06 migration covers all 5 tables; add integration test that inserts + selects a row in each.
-- [ ] **P1-M2-T06.** Run historical pull for last 30 days of crypto-15M windows. Sanity check: ≈ 96 windows/day × 30 days × 3 assets ≈ 8,600 historical-market rows.
+- [x] **P1-M2-T01.** `scripts/kalshi_historical_pull.py` via `src/kalshi_rest.KalshiRestClient` — paginated `/historical/markets`, idempotent upsert into `kalshi_historical_markets`, comparator normalization (`greater_or_equal` → `at_least`). Live-verified: 7,159 BTC markets / 7s. (2026-04-20)
+- [x] **P1-M2-T02.** Same script — `--skip-trades` toggle; pulls `/historical/trades` per market ticker. Unit-tested via mocked client; live-pull of full day pending a throughput test with trades enabled. (2026-04-20)
+- [ ] **P1-M2-T03.** Pull candlesticks via `GET /markets/{ticker}/candlesticks?period_interval=1` — deferred; `/historical/trades` gives us fills directly so candles are secondary for P1.
+- [x] **P1-M2-T04.** `scripts/kalshi_track_reference.py` — polls Coinbase `/products/{BTC,ETH,SOL}-USD/ticker` once per second; writes through `BasketReferenceSource.record_tick` + `insert_tick`. Live-verified: 3 BTC ticks captured (75217.97 … 75225). SIGINT / SIGTERM graceful stop. Multi-exchange WS upgrade deferred to P2. (2026-04-20)
+- [x] **P1-M2-T05.** Migration covers all 5 tables (already true from P1-M0). `test_migrate_db.py::test_insert_select_roundtrip_per_table` writes + reads a row from each. (2026-04-19)
+- [ ] **P1-M2-T06.** Run historical pull for last 30 days of crypto-15M windows + run reference daemon forward in parallel for ≥ 1 day (so `reference_ticks` aligns with settlements). **Blocker:** time-in-wall-clock — the reference daemon must run simultaneously with live Kalshi resolutions; backfilling CF-Benchmarks history is the alternative (P1-M2-T03 scope).
 
 Verification:
 ```bash
