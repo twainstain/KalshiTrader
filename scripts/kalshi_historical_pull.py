@@ -125,6 +125,20 @@ def _to_epoch_s(value: Any) -> int:
     return 0
 
 
+def _derive_series_ticker(market: dict) -> str:
+    """Best-effort series_ticker extraction.
+
+    Kalshi's historical-markets response doesn't always populate
+    `series_ticker` directly; the series is the `-`-prefixed namespace of
+    the market ticker (e.g. `KXBTC15M-26FEB180000-00` → `KXBTC15M`).
+    """
+    direct = market.get("series_ticker") or market.get("series")
+    if direct:
+        return str(direct)
+    ticker = market.get("ticker") or market.get("market_ticker") or ""
+    return ticker.split("-", 1)[0] if "-" in ticker else ""
+
+
 def upsert_market(conn: Any, market: dict) -> None:
     """Upsert one row into `kalshi_historical_markets` keyed on market_ticker."""
     ticker = market.get("ticker") or market.get("market_ticker")
@@ -144,7 +158,7 @@ def upsert_market(conn: Any, market: dict) -> None:
     comparator = COMPARATOR_MAP.get(raw_comparator, raw_comparator)
     row = (
         ticker,
-        market.get("series_ticker", ""),
+        _derive_series_ticker(market),
         market.get("event_ticker", ""),
         str(strike),
         comparator,
