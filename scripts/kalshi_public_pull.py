@@ -44,6 +44,10 @@ SERIES_BY_ASSET: dict[str, tuple[str, ...]] = {
     "btc": ("KXBTC15M",),
     "eth": ("KXETH15M",),
     "sol": ("KXSOL15M",),
+    "xrp": ("KXXRP15M",),
+    "doge": ("KXDOGE15M",),
+    "bnb": ("KXBNB15M",),
+    "hype": ("KXHYPE15M",),
 }
 
 COMPARATOR_MAP: dict[str, str] = {
@@ -61,6 +65,10 @@ def _series_for_asset(asset: str) -> tuple[str, ...]:
     if asset in SERIES_BY_ASSET:
         return SERIES_BY_ASSET[asset]
     raise ValueError(f"unknown asset {asset!r}")
+
+
+def _asset_choices() -> tuple[str, ...]:
+    return ("all",) + tuple(sorted(SERIES_BY_ASSET.keys()))
 
 
 def _to_epoch_s(val: Any) -> int:
@@ -200,8 +208,7 @@ def paginate_markets(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Public pull — settled crypto 15M markets.")
-    parser.add_argument("--asset", default="all",
-                        choices=("btc", "eth", "sol", "all"))
+    parser.add_argument("--asset", default="all", choices=_asset_choices())
     parser.add_argument("--days", type=int, default=None,
                         help="Filter to markets whose close_ts is within the last N days.")
     parser.add_argument("--max-markets", type=int, default=None,

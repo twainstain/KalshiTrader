@@ -161,6 +161,17 @@ SAFE_ALTER_STATEMENTS: tuple[str, ...] = (
     "ALTER TABLE kalshi_historical_markets ADD COLUMN settlement_ts BIGINT",
     "ALTER TABLE kalshi_historical_markets ADD COLUMN expiration_value TEXT",
     "ALTER TABLE kalshi_historical_markets ADD COLUMN last_price TEXT",
+    """CREATE TABLE IF NOT EXISTS coinbase_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset TEXT NOT NULL,
+        ts_us BIGINT NOT NULL,
+        price TEXT NOT NULL,
+        size TEXT NOT NULL,
+        side TEXT NOT NULL,
+        trade_id BIGINT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_cb_trades_asset_ts ON coinbase_trades (asset, ts_us)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uidx_cb_trades_id ON coinbase_trades (asset, trade_id)",
 )
 
 

@@ -53,9 +53,13 @@ logger = logging.getLogger(__name__)
 COINBASE_TICKER_URL = "https://api.exchange.coinbase.com/products/{product}/ticker"
 
 PRODUCT_BY_ASSET: dict[str, str] = {
-    "btc": "BTC-USD",
-    "eth": "ETH-USD",
-    "sol": "SOL-USD",
+    "btc":  "BTC-USD",
+    "eth":  "ETH-USD",
+    "sol":  "SOL-USD",
+    "xrp":  "XRP-USD",
+    "doge": "DOGE-USD",
+    "bnb":  "BNB-USD",
+    "hype": "HYPE-USD",
 }
 
 
@@ -170,7 +174,7 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Continuous reference-tick capture.")
     parser.add_argument("--asset", default="all",
-                        choices=("btc", "eth", "sol", "all"))
+                        choices=("all",) + tuple(sorted(PRODUCT_BY_ASSET.keys())))
     parser.add_argument("--interval", type=float, default=1.0,
                         help="Seconds between polls (default 1.0).")
     parser.add_argument("--iterations", type=int, default=None,
@@ -191,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     if args.asset == "all":
-        assets: tuple[str, ...] = ("btc", "eth", "sol")
+        assets: tuple[str, ...] = tuple(PRODUCT_BY_ASSET)
     else:
         assets = (args.asset,)
 

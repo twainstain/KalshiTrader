@@ -53,9 +53,13 @@ logger = logging.getLogger(__name__)
 
 
 PRODUCT_BY_ASSET = {
-    "btc": "BTC-USD",
-    "eth": "ETH-USD",
-    "sol": "SOL-USD",
+    "btc":  "BTC-USD",
+    "eth":  "ETH-USD",
+    "sol":  "SOL-USD",
+    "xrp":  "XRP-USD",
+    "doge": "DOGE-USD",
+    "bnb":  "BNB-USD",
+    "hype": "HYPE-USD",
 }
 CANDLES_URL = "https://api.exchange.coinbase.com/products/{product}/candles"
 MAX_CANDLES_PER_REQUEST = 300
@@ -243,7 +247,7 @@ def pull_asset(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Backfill reference_ticks from Coinbase.")
     parser.add_argument("--asset", default="all",
-                        choices=("btc", "eth", "sol", "all"))
+                        choices=("all",) + tuple(sorted(PRODUCT_BY_ASSET.keys())))
     parser.add_argument("--start", default=None,
                         help="ISO start (e.g. 2026-04-18T00:00:00Z). Overrides auto-range.")
     parser.add_argument("--end", default=None,
@@ -270,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
            or "sqlite:///data/kalshi.db")
     conn, is_pg = _open_connection(url)
     try:
-        assets = ("btc", "eth", "sol") if args.asset == "all" else (args.asset,)
+        assets = tuple(PRODUCT_BY_ASSET) if args.asset == "all" else (args.asset,)
         total = 0
         for a in assets:
             total += pull_asset(

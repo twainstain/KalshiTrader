@@ -49,9 +49,15 @@ WINDOW_SECONDS = Decimal("900")
 # chains (Mar 20 – Apr 20, 2026). Override via `sigma_15min_by_asset` or
 # rerun `scripts/calibrate_sigma.py` against the latest DB snapshot.
 DEFAULT_SIGMA_15MIN: dict[str, Decimal] = {
-    "btc": Decimal("0.00232"),   # 0.232% per 15-min  (≈ 43% annualized)
-    "eth": Decimal("0.00310"),   # 0.310% per 15-min  (≈ 58% annualized)
-    "sol": Decimal("0.00312"),   # 0.312% per 15-min  (≈ 58% annualized)
+    # Calibrated 2026-04-20 from 30 days × 2,831 BRTI consecutive log-returns
+    # per asset via scripts/calibrate_sigma.py. Annualized values in comment.
+    "btc":  Decimal("0.00232"),   # 0.232% / 15-min  (≈ 43% annual)
+    "eth":  Decimal("0.00310"),   # 0.310% / 15-min  (≈ 58% annual)
+    "sol":  Decimal("0.00312"),   # 0.312% / 15-min  (≈ 58% annual)
+    "xrp":  Decimal("0.00261"),   # 0.261% / 15-min  (≈ 49% annual)
+    "doge": Decimal("0.00292"),   # 0.292% / 15-min  (≈ 55% annual)
+    "bnb":  Decimal("0.00201"),   # 0.201% / 15-min  (≈ 38% annual)
+    "hype": Decimal("0.00379"),   # 0.379% / 15-min  (≈ 71% annual)
 }
 
 
