@@ -238,7 +238,18 @@ class BasketReferenceSource:
             if not st or not st.latest_by_src:
                 return None
             prices = {s: t.price for s, t in st.latest_by_src.items()}
-        return aggregate_basket(prices, max_dev_pct=self._max_dev_pct)
+        agg = aggregate_basket(prices, max_dev_pct=self._max_dev_pct)
+        if agg is not None:
+            return agg
+        # Single-source fallback: if we only have one venue (or outlier
+        # rejection left fewer than 2), return that venue's latest price
+        # rather than None. `aggregate_basket` refuses to aggregate < 2
+        # exchanges, which is correct for the basket-vs-CF-benchmarks
+        # tracking analysis, but overly strict for a scanner that has only
+        # one reference source wired.
+        if prices:
+            return next(iter(prices.values()))
+        return None
 
     def get_60s_avg(self, asset: str) -> Decimal | None:
         asset = asset.lower()

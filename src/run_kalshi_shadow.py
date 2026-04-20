@@ -53,7 +53,9 @@ from market.kalshi_market import (  # noqa: E402
     KalshiMarketSource,
     book_to_market_quote,
 )
-from strategy.kalshi_fair_value import FairValueModel, KalshiFairValueStrategy  # noqa: E402
+from strategy.kalshi_fair_value import (  # noqa: E402
+    FairValueModel, KalshiFairValueStrategy, StrategyConfig,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -63,9 +65,28 @@ logger = logging.getLogger(__name__)
 # entrypoint can be swapped for a Polymarket/etc. variant without dragging
 # Kalshi-specific constants along.
 ASSET_FROM_SERIES = {
-    "KXBTC15M": "btc",
-    "KXETH15M": "eth",
-    "KXSOL15M": "sol",
+    "KXBTC15M":  "btc",
+    "KXETH15M":  "eth",
+    "KXSOL15M":  "sol",
+    "KXXRP15M":  "xrp",
+    "KXDOGE15M": "doge",
+    "KXBNB15M":  "bnb",
+    "KXHYPE15M": "hype",
+}
+
+
+# Kalshi's public API returns `strike_type` values that our MarketQuote
+# validation doesn't know (`greater_or_equal`). Normalize into the model's
+# supported comparator set.
+COMPARATOR_MAP = {
+    "greater_or_equal": "at_least",
+    "greater_than":     "above",
+    "less_or_equal":    "below",
+    "less_than":        "below",
+    "ge": "at_least",
+    "gt": "above",
+    "le": "below",
+    "lt": "below",
 }
 
 
@@ -104,9 +125,11 @@ class LiveDataCoordinator:
         """Refresh the active-markets catalog. Called less often than per-tick."""
         for series, asset in ASSET_FROM_SERIES.items():
             try:
+                # Kalshi's valid /markets status values are `open`, `unopened`,
+                # `settled`. Use `open` (actively trading) for shadow scoring.
                 resp = self._rest.request(
                     "GET", "/markets",
-                    params={"series_ticker": series, "status": "active",
+                    params={"series_ticker": series, "status": "open",
                             "limit": self._market_limit},
                     authenticated=False,
                 )
@@ -117,14 +140,19 @@ class LiveDataCoordinator:
                 ticker = m.get("ticker")
                 if not ticker:
                     continue
-                from scripts_compat import parse_iso_or_epoch  # (inline below)
+                raw_comparator = (m.get("strike_type") or "above").lower()
+                comparator = COMPARATOR_MAP.get(raw_comparator, raw_comparator)
+                # `close_time` is the 15-min window boundary (what we care
+                # about for time_remaining). `expiration_time` in Kalshi's
+                # response is actually 7 days later (a final-cutoff value);
+                # **don't** use it for time_remaining computations.
                 self._market_meta[ticker] = {
                     "series_ticker": series,
                     "event_ticker": m.get("event_ticker", ""),
                     "strike": m.get("strike_price") or m.get("floor_strike") or 0,
-                    "comparator": (m.get("strike_type") or "above").lower(),
-                    "expiration_ts": parse_iso_or_epoch(
-                        m.get("expiration_time") or m.get("close_time")
+                    "comparator": comparator,
+                    "expiration_ts": scripts_compat.parse_iso_or_epoch(
+                        m.get("close_time")
                     ),
                     "asset": asset,
                 }
@@ -141,7 +169,15 @@ class LiveDataCoordinator:
             except Exception as e:  # noqa: BLE001
                 logger.warning("book fetch %s failed: %s", ticker, e)
                 continue
-            book = (resp or {}).get("orderbook") or {}
+            # Kalshi's response uses `orderbook_fp` with `yes_dollars` /
+            # `no_dollars` keys (fixed-point dollar-string format). Translate
+            # into the `{yes: [...], no: [...]}` shape that our
+            # `KalshiMarketSource.apply_snapshot` expects.
+            raw = (resp or {}).get("orderbook_fp") or (resp or {}).get("orderbook") or {}
+            book = {
+                "yes": raw.get("yes_dollars") or raw.get("yes") or [],
+                "no":  raw.get("no_dollars")  or raw.get("no")  or [],
+            }
             self._market_source.apply_snapshot(ticker, book)
             status = (self._market_meta[ticker].get("status") or "active")
             exp = int(self._market_meta[ticker].get("expiration_ts") or 0)
@@ -202,7 +238,15 @@ class scripts_compat:  # noqa: N801 — deliberately lowercase to signal "proxy"
 def default_coinbase_fetcher(asset: str) -> Decimal | None:
     """Default implementation — blocking HTTP. Replace with WS in P2."""
     import requests
-    product = {"btc": "BTC-USD", "eth": "ETH-USD", "sol": "SOL-USD"}.get(asset.lower())
+    product = {
+        "btc":  "BTC-USD",
+        "eth":  "ETH-USD",
+        "sol":  "SOL-USD",
+        "xrp":  "XRP-USD",
+        "doge": "DOGE-USD",
+        "bnb":  "BNB-USD",
+        "hype": "HYPE-USD",
+    }.get(asset.lower())
     if not product:
         return None
     try:
@@ -267,12 +311,21 @@ def build_evaluator(
     *, conn: Any, is_postgres: bool,
     rest_client: Any,
     reference_fetcher: Callable[[str], Decimal | None],
+    strategy_config: StrategyConfig | None = None,
 ) -> tuple[KalshiShadowEvaluator, LiveDataCoordinator]:
     """Wire everything together. Not called from tests."""
     market_source = KalshiMarketSource(KalshiMarketConfig())
     reference_source = BasketReferenceSource(assets=tuple(set(ASSET_FROM_SERIES.values())))
     reference_source.start()
-    strategy = KalshiFairValueStrategy(FairValueModel())
+    # Shadow-evaluator defaults: permissive CI gate and modest edge floor
+    # so we LOG every borderline decision. The P2 live executor will use
+    # the restrictive defaults from StrategyConfig() before real money.
+    cfg = strategy_config or StrategyConfig(
+        min_edge_bps_after_fees=Decimal("50"),   # 0.5 pp — capture marginal too
+        max_ci_width=Decimal("1.0"),              # record everything
+        min_book_depth_usd=Decimal("50"),         # accept thin books for shadow
+    )
+    strategy = KalshiFairValueStrategy(FairValueModel(), cfg)
 
     coordinator = LiveDataCoordinator(
         rest_client=rest_client,
@@ -363,7 +416,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Lazy import — avoids requiring the SDK in pure-unit-test runs.
     from kalshi_rest import KalshiRestClient
-    rest_client = KalshiRestClient.from_env()
+    # For Phase-1 shadow evaluator we only hit PUBLIC endpoints (/markets,
+    # /markets/{ticker}/orderbook). These live only on the prod host —
+    # demo.kalshi.co doesn't carry the CRYPTO15M product families. Force
+    # `env=prod` here regardless of `.env`; authenticated endpoints stay
+    # untouched so the demo key is still what gets signed if we ever flip.
+    rest_client = KalshiRestClient.from_env(env="prod")
 
     url = (args.database_url or os.environ.get("DATABASE_URL")
            or "sqlite:///data/kalshi.db")

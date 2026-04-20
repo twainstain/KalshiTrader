@@ -144,9 +144,13 @@ class KalshiShadowEvaluator:
         self._market_source = market_source
         self._reference_source = reference_source
         self._strategy = strategy or KalshiFairValueStrategy(FairValueModel())
-        self._market_meta = market_meta_by_ticker or {}
-        self._asset_by_ticker = asset_by_ticker or {}
-        self._fee_bps = fee_bps_by_ticker or {}
+        # Don't use `x or {}` — when caller passes an empty-but-shared dict
+        # (as the run-loop coordinator does, populating it later), `or` would
+        # dereference to a fresh empty dict and break the shared-mutation
+        # contract. Only `is None` should substitute a new dict.
+        self._market_meta = {} if market_meta_by_ticker is None else market_meta_by_ticker
+        self._asset_by_ticker = {} if asset_by_ticker is None else asset_by_ticker
+        self._fee_bps = {} if fee_bps_by_ticker is None else fee_bps_by_ticker
         self._conn = conn
         self._is_postgres = is_postgres
         self._resolve = resolution_lookup
