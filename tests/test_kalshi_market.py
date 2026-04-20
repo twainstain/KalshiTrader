@@ -178,15 +178,16 @@ def test_make_client_uses_factory_when_provided(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_factory(*, host: str, api_key_id: str, private_key_pem: bytes):
-        captured.update(host=host, api_key_id=api_key_id, pem=private_key_pem)
+    def fake_factory(*, host: str, api_key_id: str, private_key_path: str):
+        captured.update(host=host, api_key_id=api_key_id,
+                       private_key_path=private_key_path)
         return MagicMock(name="FakeClient")
 
     client = km.make_client(env="demo", private_key_path=str(pem),
                             client_factory=fake_factory)
     assert captured["host"] == km.REST_HOSTS["demo"]
     assert captured["api_key_id"] == "key-id-x"
-    assert captured["pem"] == b"-----BEGIN FAKE-----\n"
+    assert captured["private_key_path"] == str(pem)
     assert client is not None
 
 

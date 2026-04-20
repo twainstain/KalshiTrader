@@ -204,10 +204,6 @@ def lifecycle_tag(status: str, time_remaining_s: float) -> str:
 # Client + discovery (T02, T03) — network-touching, unit-tested via mocks.
 # ---------------------------------------------------------------------------
 
-def _load_pem(path: Path) -> bytes:
-    return path.read_bytes()
-
-
 def make_client(
     *,
     env: str | None = None,
@@ -215,11 +211,16 @@ def make_client(
     private_key_path: str | Path | None = None,
     client_factory: Callable[..., Any] | None = None,
 ) -> Any:
-    """Build a `KalshiClient` from env or explicit args.
+    """Build an authenticated `KalshiClient` from env or explicit args.
 
-    The SDK is imported lazily so unit tests (and `pytest tests/` without
-    `pip install -e .`) don't need it on disk. `client_factory` is the
-    override seam for tests — when set, skips the import entirely.
+    The SDK (`kalshi_python_sync` ≥ 3.2) is imported lazily so unit tests
+    can run without the dep on disk. `client_factory` is the override seam
+    for tests — when set, receives `(host, api_key_id, private_key_path)`
+    and skips the SDK import entirely.
+
+    Returns a `KalshiClient` with `set_kalshi_auth()` already applied; the
+    caller wraps it with a per-endpoint API class (e.g.
+    `PortfolioApi(api_client=client)`).
     """
     import os
 
@@ -237,20 +238,30 @@ def make_client(
             f"KALSHI_PRIVATE_KEY_PATH does not resolve to a file: {pem_path!r}"
         )
 
-    pem_bytes = _load_pem(pem_path)
     host = REST_HOSTS[env]
 
-    if client_factory is None:
-        try:
-            from kalshi_python_sync import KalshiClient, Configuration  # type: ignore
-        except ImportError as e:
-            raise RuntimeError(
-                "kalshi_python_sync is not installed — run `pip install -e .`"
-            ) from e
-        cfg = Configuration(host=host, api_key_id=key_id, private_key_pem=pem_bytes)
-        return KalshiClient(cfg)
+    if client_factory is not None:
+        return client_factory(host=host, api_key_id=key_id,
+                              private_key_path=str(pem_path))
 
-    return client_factory(host=host, api_key_id=key_id, private_key_pem=pem_bytes)
+    try:
+        from kalshi_python_sync import KalshiClient, Configuration  # type: ignore
+        from kalshi_python_sync.auth import KalshiAuth  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "kalshi_python_sync is not installed — run `pip install -e .`"
+        ) from e
+
+    cfg = Configuration(host=host)
+    client = KalshiClient(configuration=cfg)
+    # SDK 3.2.0 has two bugs in `set_kalshi_auth`:
+    #   (a) it references `KalshiAuth` without importing it, and
+    #   (b) it forwards `private_key_path` verbatim to KalshiAuth, which
+    #       actually expects the PEM *content* (bytes/str), not a path.
+    # Read the PEM ourselves and assign auth directly to sidestep both.
+    pem_bytes = pem_path.read_bytes()
+    client.kalshi_auth = KalshiAuth(key_id, pem_bytes)
+    return client
 
 
 def discover_active_crypto_markets(

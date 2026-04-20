@@ -33,7 +33,7 @@ Two unit-test-covered tasks need a demo API key to exercise the live path:
 - **P1-M1-T02 live:** `client.get_balance()` sanity check on `demo-api.kalshi.co`. Code wired via `make_client()` with lazy SDK import.
 - **P1-M1-T04 live:** WS handshake against `wss://api.elections.kalshi.com/orderbook_delta`. Loop structure + reconnect backoff + breaker + stop signaling are in place; only the handshake + message parsing remain.
 
-**Unblocks on:** user generates demo key at `demo.kalshi.co/account/profile`, saves PEM outside repo, populates `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` in `.env`.
+**Unblocks on:** user generates demo key by logging into `https://demo.kalshi.co` → Account & security → API Keys → Create Key (Kalshi docs do **not** publish a direct `/account/profile` deep link for demo — use UI nav). Prod path, for later Phase 2, is `https://kalshi.com/account/profile` (direct link IS valid). Script `scripts/store_kalshi_key.sh` writes PEM to `~/.kalshi/<env>_private_key.pem` (chmod 600) and wires `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` into `.env`.
 
 ## Next concrete work
 

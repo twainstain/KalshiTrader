@@ -2,7 +2,7 @@
 
 **Research date:** 2026-04-19
 **Structure:** Two phases — Phase 1 (Scanner / Feasibility Research, zero money at risk) → Phase 1→2 Gate → Phase 2 (Execution, real money).
-**Status:** P1-M0 scaffolding complete + P1-M1 code scaffolding complete (2026-04-19). Blocked on P-02 demo key for live WS handshake + `get_balance()` validation — all unit-test paths green with mocked client (78 passing).
+**Status:** P1-M0 + P1-M1 code + P1-M3 code complete (2026-04-20). T02-live verified (`get_balance()` returns on demo). P1-M1-T04-live WS handshake + P1-M2 historical pull still pending. 117 tests passing.
 **Companion docs:** [`kalshi_crypto_fair_value_scanner_plan.md`](./kalshi_crypto_fair_value_scanner_plan.md) (strategy), [`kalshi_scanner_execution_plan.md`](./kalshi_scanner_execution_plan.md) (architecture / how-to).
 **Repo:** `/Users/tamir.wainstain/src/KalshiTrader/` — everything (docs + code + tests + configs + deploy) lives here. All paths below are relative to this repo unless prefixed.
 
@@ -29,9 +29,9 @@
 | — | Open architectural decisions (repo bootstrap + platform primitives) | resolved | 2 / 2 |
 | — | Prerequisites | not started | 0 / 5 |
 | P1 | M0 Repo prep | **complete** | **6 / 6** |
-| P1 | M1 Live data collection | **code complete (2 live-gated)** | **11 / 13** |
+| P1 | M1 Live data collection | **code complete (1 live-gated)** | **12 / 13** |
 | P1 | M2 Historical data collection | not started | 0 / 6 |
-| P1 | M3 Fair-value model + backtest | not started | 0 / 8 |
+| P1 | M3 Fair-value model + backtest | **code complete (T08 data-gated)** | **7 / 8** |
 | P1 | M4 Live shadow evaluator | not started | 0 / 7 |
 | P1 | M5 Feasibility analysis + report | not started | 0 / 5 |
 | — | **Phase 1 → Phase 2 Gate** | **pending** | **0 / 1** |
@@ -42,7 +42,7 @@
 | P2 | M5 Live small size (2 weeks) | not started | 0 / 5 |
 | P2 | M6 Scale | not started | 0 / 4 |
 | — | Cross-cutting | not started | 0 / 4 |
-| **Total** | | **in progress** | **19 / 89** |
+| **Total** | | **in progress** | **27 / 89** |
 
 ## 3. Kalshi API reference card (source of truth)
 
@@ -183,7 +183,7 @@ python3.11 scripts/migrate_db.py
 ### KalshiMarketSource (read-only)
 
 - [x] **P1-M1-T01.** `src/market/kalshi_market.py` — `KalshiMarketSource` with start/stop/get_quotes/is_healthy, `apply_snapshot`/`apply_delta`/`update_lifecycle` test seams. (2026-04-19)
-- [~] **P1-M1-T02.** `make_client()` builds `KalshiClient` from `KALSHI_API_KEY_ID` + PEM via lazy SDK import; factory seam unit-tested. **Blocker:** live `client.get_balance()` validation gated on P-02 (demo key).
+- [x] **P1-M1-T02.** `make_client()` builds an authenticated `KalshiClient` via lazy SDK import. Live verified 2026-04-20: `PortfolioApi(api_client=c).get_balance()` returns on demo (`balance=0 portfolio_value=0`). Works around two SDK 3.2.0 bugs: `set_kalshi_auth` misses a `KalshiAuth` import and forwards the PEM path where PEM content is required — we read PEM bytes and assign `client.kalshi_auth` directly.
 - [x] **P1-M1-T03.** `discover_active_crypto_markets()` queries `/series?category=crypto`, logs missing/surprising tickers against `EXPECTED_CRYPTO_SERIES`, pulls `/markets?status=active` per series. Mock-tested. (2026-04-19)
 - [~] **P1-M1-T04.** WS loop scaffolded with reconnect backoff + breaker integration + stop signaling. **Blocker:** actual handshake + orderbook_delta parsing require a demo key to exercise against `wss://api.elections.kalshi.com/`. Snapshot/delta application paths are test-covered.
 - [x] **P1-M1-T05.** `book_to_market_quote()` pure fn — asks derived (`1 − opposite_bid`), depth summed over top-N levels, all plan §2.1 fields populated, `fee_included=False` enforced. (2026-04-19)
@@ -220,14 +220,14 @@ python3.11 scripts/kalshi_historical_pull.py --days 30 --asset all
 
 ## P1-M3 — Fair-value model + backtest (4–6 days)
 
-- [ ] **P1-M3-T01.** Create `src/strategy/kalshi_fair_value.py` with `FairValueModel` class.
-- [ ] **P1-M3-T02.** Implement `time_remaining_s > 60` regime: Brownian projection of 60 s-avg at close; integrate over comparator's acceptance region.
-- [ ] **P1-M3-T03.** Implement `time_remaining_s ≤ 60` regime: partial-observation conditional distribution of remaining averaged ticks.
-- [ ] **P1-M3-T04.** Implement no-data haircut (`no_data_adjustment`, default 0.005) per strategy plan §0.5.
-- [ ] **P1-M3-T05.** Implement `KalshiFairValueStrategy` satisfying `Strategy` protocol. In P1 it emits hypothetical decisions that feed the shadow evaluator (P1-M4) — **does not** emit live-executable `Opportunity` objects.
-- [ ] **P1-M3-T06.** Create `src/run_kalshi_backtest.py` — replay entrypoint reading DB-stored Phase-1 data; scores Brier vs naive `p_yes = implied_mid_at_entry`; outputs report.
-- [ ] **P1-M3-T07.** Unit tests: `tests/test_fair_value_model.py`, `tests/test_kalshi_strategy.py`.
-- [ ] **P1-M3-T08.** Run backtest on ≥ 500 historical windows per asset. Acceptance: Brier < naive baseline; calibration error ≤ 3 pp in every decile.
+- [x] **P1-M3-T01.** `src/strategy/kalshi_fair_value.py` with `FairValueModel` dataclass (annual_vol_by_asset override, no_data_haircut, min_sigma_horizon). (2026-04-20)
+- [x] **P1-M3-T02.** `prob_above_strike()` + `annual_vol_to_horizon()` pure helpers drive the `>60s` regime — project to window midpoint via GBM, `Φ((ln(S/K) − σ²T/2) / σ√T)`. (2026-04-20)
+- [x] **P1-M3-T03.** `≤60s` regime blends observed `reference_60s_avg` (weight = seconds_observed/60) with drift-free projection of the remaining window; variance scaled by `remaining_s / 60`. (2026-04-20)
+- [x] **P1-M3-T04.** `no_data_haircut=Decimal("0.005")` subtracted and clamped to `[0,1]` inside `price()`. Haircut is recorded on `Opportunity.no_data_haircut_bps`. (2026-04-20)
+- [x] **P1-M3-T05.** `KalshiFairValueStrategy` with `StrategyConfig` thresholds (min_edge_bps_after_fees, max_ci_width, min_book_depth_usd, time_window_seconds, hypothetical_size_contracts). `evaluate()` returns `Opportunity` or `None`; `status=PRICED`. (2026-04-20)
+- [x] **P1-M3-T06.** `src/run_kalshi_backtest.py` — reads DB rows, scores via `FairValueModel`, renders Markdown report with per-asset Brier / hit-rate + pooled calibration table. Graceful empty-DB message. (2026-04-20)
+- [x] **P1-M3-T07.** `tests/test_fair_value_model.py` (17), `tests/test_kalshi_strategy.py` (12), `tests/test_run_kalshi_backtest.py` (10). All green. (2026-04-20)
+- [ ] **P1-M3-T08.** Run backtest on ≥ 500 historical windows per asset. **Blocker:** needs P1-M2 historical pull to populate `kalshi_historical_markets` + `reference_ticks` + `kalshi_historical_trades`. Acceptance: Brier < naive baseline; calibration error ≤ 3 pp in every decile.
 
 Verification:
 ```bash
