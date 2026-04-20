@@ -2,7 +2,7 @@
 
 **Research date:** 2026-04-19
 **Structure:** Two phases — Phase 1 (Scanner / Feasibility Research, zero money at risk) → Phase 1→2 Gate → Phase 2 (Execution, real money).
-**Status:** P1-M0 + P1-M1 code + P1-M3 code + P1-M2 historical-pull / reference-daemon code complete (2026-04-20). Live verified: `get_balance()` (demo), 7,159 BTC markets pulled in 7s, Coinbase reference ticks flowing into SQLite. 150 tests passing. **Gap:** backtest needs `reference_ticks` history aligned with past market settlements — either run the daemon forward-looking for hours or add a Coinbase historical-candle puller.
+**Status:** P1-M0 + P1-M1 + P1-M2 + P1-M3 + P1-M4 code complete (2026-04-20). 165 tests passing. End-to-end smoke against demo + Coinbase verified the full pipeline byte-by-byte. **Demo-is-synthetic finding** (see `docs/kalshi_phase1_smoke_test_findings.md`) makes prod historical access the critical path for real feasibility conclusions. **P1-M5 (feasibility report) blocked on prod data.**
 **Companion docs:** [`kalshi_crypto_fair_value_scanner_plan.md`](./kalshi_crypto_fair_value_scanner_plan.md) (strategy), [`kalshi_scanner_execution_plan.md`](./kalshi_scanner_execution_plan.md) (architecture / how-to).
 **Repo:** `/Users/tamir.wainstain/src/KalshiTrader/` — everything (docs + code + tests + configs + deploy) lives here. All paths below are relative to this repo unless prefixed.
 
@@ -32,7 +32,7 @@
 | P1 | M1 Live data collection | **code complete (1 live-gated)** | **12 / 13** |
 | P1 | M2 Historical data collection | **code complete (T03/T06 pending)** | **4 / 6** |
 | P1 | M3 Fair-value model + backtest | **code complete (T08 data-gated)** | **7 / 8** |
-| P1 | M4 Live shadow evaluator | not started | 0 / 7 |
+| P1 | M4 Live shadow evaluator | **code complete (T06 deploy deferred)** | **6 / 7** |
 | P1 | M5 Feasibility analysis + report | not started | 0 / 5 |
 | — | **Phase 1 → Phase 2 Gate** | **pending** | **0 / 1** |
 | P2 | M1 Risk rules + Paper executor | not started | 0 / 13 |
@@ -42,7 +42,7 @@
 | P2 | M5 Live small size (2 weeks) | not started | 0 / 5 |
 | P2 | M6 Scale | not started | 0 / 4 |
 | — | Cross-cutting | not started | 0 / 4 |
-| **Total** | | **in progress** | **31 / 89** |
+| **Total** | | **in progress** | **37 / 89** |
 
 ## 3. Kalshi API reference card (source of truth)
 
@@ -239,8 +239,8 @@ python3.11 -m run_kalshi_backtest --data-from db --report /tmp/backtest.md
 
 Runs in prod against real Kalshi markets + real reference feed, records every hypothetical decision + realized outcome. **Never submits orders.**
 
-- [ ] **P1-M4-T01.** Create `src/execution/kalshi_shadow_evaluator.py` with `KalshiShadowEvaluator`. Inputs: live `MarketQuote` stream + `FairValueModel`. Output: rows in `shadow_decisions`.
-- [ ] **P1-M4-T02.** Wire `KalshiMarketSource` + `CryptoReferenceSource` + `FairValueModel` into the evaluator. **No `Executor` protocol wired** — trading path is structurally absent in P1.
+- [x] **P1-M4-T01.** `src/execution/kalshi_shadow_evaluator.py` — `KalshiShadowEvaluator` with `tick()` engine style (snapshot refs → fetch quotes → score → persist → reconcile). No executor wired. (2026-04-20)
+- [x] **P1-M4-T02.** Market source + reference source + strategy composed inside the evaluator via duck-typed Protocols. `market_meta_by_ticker` + `asset_by_ticker` dicts link quotes to per-asset reference prices. (2026-04-20)
 - [ ] **P1-M4-T03.** Finalize `shadow_decisions` schema:
   - `id` (pk), `market_ticker`, `ts_us`
   - `p_yes`, `ci_width`, `reference_price`, `reference_60s_avg`, `time_remaining_s`
@@ -251,10 +251,10 @@ Runs in prod against real Kalshi markets + real reference feed, records every hy
   - `realized_pnl_usd` (populated at settlement, assuming hypothetical fill)
   - `latency_ms_ref_to_decision`, `latency_ms_book_to_decision`
   - Indexes on `market_ticker`, `ts_us`, `realized_outcome`.
-- [ ] **P1-M4-T04.** Post-window reconciler: at `expiration_ts + 30s`, call public `GET /markets/{ticker}` for the settled result; update realized columns.
-- [ ] **P1-M4-T05.** Create `src/run_kalshi_shadow.py` — long-running entry point (event-driven). Graceful shutdown on SIGINT/SIGTERM.
-- [ ] **P1-M4-T06.** Deploy to EC2 (CPU-light). systemd unit `kalshi-shadow.service`. `scripts/run_local.sh` + a prod equivalent. Log rotation configured.
-- [ ] **P1-M4-T07.** Integration test `tests/test_kalshi_shadow_evaluator.py` — mocked Kalshi WS + mocked reference feed; replay fixture; assert expected rows in `shadow_decisions`.
+- [x] **P1-M4-T04.** `_reconcile_pending()` polls `resolution_lookup(ticker)` once `expiration_ts + reconcile_delay_s` elapsed; updates `realized_outcome` + `realized_pnl_usd`. Max-attempts guard; `no_data` resolves to `no` per CRYPTO15M.pdf §0.5. (2026-04-20)
+- [x] **P1-M4-T05.** `src/run_kalshi_shadow.py` — `LiveDataCoordinator` orchestrates discover + snapshot_books + sample_reference per tick. `run_loop()` drives `tick()` with `--iterations / --no-sleep / --interval-s`, graceful SIGINT/SIGTERM. (2026-04-20)
+- [ ] **P1-M4-T06.** Deploy to EC2 (CPU-light). systemd unit `kalshi-shadow.service`. `scripts/run_local.sh` + a prod equivalent. Log rotation configured. **Deferred:** unblocks with P2-M4 deploy stack.
+- [x] **P1-M4-T07.** `tests/test_kalshi_shadow_evaluator.py` — 15 tests covering `tick()` happy path, strategy-reject skip, asset-map skip, reconciler apply / skip / max-attempts-give-up / pre-expiration wait, P/L math (yes-win, no-loss, none → 0, no_data → no), `run_loop` iteration + stop-event. All green. (2026-04-20)
 
 Verification:
 ```bash
