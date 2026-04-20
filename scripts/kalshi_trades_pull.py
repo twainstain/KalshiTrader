@@ -54,7 +54,10 @@ def open_connection(url: str) -> sqlite3.Connection:
             path = Path(raw.lstrip("/"))
         else:
             path = Path(raw)
-        return sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(path), timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
     raise ValueError(f"sqlite URLs only: {url!r}")
 
 
@@ -139,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Specific market ticker(s) — can repeat.")
     parser.add_argument("--from-db", action="store_true",
                         help="Pull all settled markets of --asset from kalshi_historical_markets.")
-    parser.add_argument("--asset", default="btc", choices=("btc","eth","sol"))
+    parser.add_argument("--asset", default="btc",
+                        choices=("btc","eth","sol","xrp","doge","bnb","hype"))
     parser.add_argument("--limit", type=int, default=None,
                         help="Cap --from-db tickers (smoke test).")
     parser.add_argument("--database-url", default=None)

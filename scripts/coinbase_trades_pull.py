@@ -36,7 +36,10 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-PRODUCT_BY_ASSET = {"btc":"BTC-USD","eth":"ETH-USD","sol":"SOL-USD"}
+PRODUCT_BY_ASSET = {
+    "btc":"BTC-USD","eth":"ETH-USD","sol":"SOL-USD",
+    "xrp":"XRP-USD","doge":"DOGE-USD","bnb":"BNB-USD","hype":"HYPE-USD",
+}
 TRADES_URL = "https://api.exchange.coinbase.com/products/{product}/trades"
 
 
@@ -58,7 +61,10 @@ def open_connection(url: str) -> tuple[sqlite3.Connection, bool]:
             path = Path(raw.lstrip("/"))
         else:
             path = Path(raw)
-        return sqlite3.connect(str(path)), False
+        conn = sqlite3.connect(str(path), timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn, False
     raise ValueError(f"sqlite URLs only: {url!r}")
 
 
@@ -155,7 +161,8 @@ def pull_coinbase_trades(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Pull Coinbase trades over a window.")
-    parser.add_argument("--asset", default="btc", choices=("btc","eth","sol"))
+    parser.add_argument("--asset", default="btc",
+                        choices=tuple(sorted(PRODUCT_BY_ASSET.keys())))
     parser.add_argument("--start", help="ISO UTC, e.g. 2026-04-20T12:45:00Z")
     parser.add_argument("--end", help="ISO UTC, e.g. 2026-04-20T13:00:00Z")
     parser.add_argument("--window-minutes", type=int, default=None,
