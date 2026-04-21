@@ -88,6 +88,41 @@ def test_insert_select_roundtrip_per_table(sqlite_url, sqlite_path):
             ("KXBTC15M-T", 4_000, "0.5", "0.08", "64999.5", "64995.1", "45",
              "0.42", "0.58", "1500", "1800", "yes", "0.42", "50", "120", "35"),
         )
+        conn.execute(
+            "INSERT INTO kalshi_ideas_profiles "
+            "(profile_slug, username, display_name, social_id, bio, profile_image_url, "
+            " profile_image_path, pending_profile_image_path, total_trades, "
+            " total_predictions, correct_predictions, win_rate, profit_usd, "
+            " follower_count, following_count, posts_count, profile_view_count, "
+            " joined_at, top_categories_json, blocked, inner_circle_enabled, "
+            " inner_circle_viewer_status, metrics_volume, metrics_volume_fp, "
+            " metrics_pnl, metrics_num_markets_traded, metrics_raw_json, raw_json, fetched_at_us) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("best.gun2", "best.gun2", "Best Gun", "social-1", "bio", "https://img",
+             "path", "", "5", "11", "8", "72.7%", "120.50",
+             1, 2, 3, 4, "2026-04-01", json.dumps(["Sports"]), 0, 0, "none",
+             100, "100.00", 50, 5, json.dumps({"m": "v"}), json.dumps({"k": "v"}), 5_000),
+        )
+        conn.execute(
+            "INSERT INTO kalshi_ideas_leaderboard_entries "
+            "(category, time_period, rank, profile_slug, username, display_name, social_id, "
+            " profile_image_path, metric_value, profit_usd, winning_streak, "
+            " total_predictions, correct_predictions, is_anonymous, raw_json, fetched_at_us) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("profits", "monthly", 1, "best.gun2", "best.gun2", "Best Gun", "social-1",
+             "crypto", "120.50", "120.50", "4", "11", "8", 0, json.dumps({"k": "v"}), 6_000),
+        )
+        conn.execute(
+            "INSERT INTO kalshi_ideas_trades "
+            "(trade_id, profile_slug, social_id, market_id, ticker, price_dollars, "
+            " count_fp, taker_side, maker_action, taker_action, maker_nickname, "
+            " taker_nickname, maker_social_id, taker_social_id, related_role, "
+            " created_ts_us, raw_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("trade-1", "best.gun2", "social-1", "market-1", "KXNBA-1", "0.36",
+             "10.00", "yes", "sell", "buy", "", "best.gun2", "",
+             "social-1", "taker", 7_000, json.dumps({"k": "v"})),
+        )
         conn.commit()
 
         assert conn.execute(
@@ -104,6 +139,15 @@ def test_insert_select_roundtrip_per_table(sqlite_url, sqlite_path):
         ).fetchone()[0] == 1
         assert conn.execute(
             "SELECT COUNT(*) FROM shadow_decisions"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kalshi_ideas_profiles"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kalshi_ideas_leaderboard_entries"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kalshi_ideas_trades"
         ).fetchone()[0] == 1
     finally:
         conn.close()

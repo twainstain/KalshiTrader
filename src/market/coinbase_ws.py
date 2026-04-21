@@ -28,6 +28,8 @@ import time
 from decimal import Decimal
 from typing import Callable
 
+import ops_events
+
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,11 @@ class CoinbaseWSReference:
             except Exception as e:  # noqa: BLE001
                 logger.warning("coinbase WS error: %s — reconnecting in %.1fs",
                                e, backoff)
+                ops_events.emit(
+                    "coinbase_ws", "warn",
+                    f"WS disconnected — reconnecting in {backoff:.1f}s",
+                    {"error": str(e), "backoff_s": backoff},
+                )
                 self._connected = False
                 if self._stop_event.is_set():
                     break

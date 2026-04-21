@@ -446,6 +446,13 @@ class KalshiMarketSource:
                 continue
             asset = meta.get("asset", "btc").lower()
             warnings = self._freshness_warnings(entry.last_update_us, now_us)
+            # Use the book's own update timestamp (not `now_us`) so
+            # downstream latency accounting (`latency_ms_book_to_decision`)
+            # and paper-executor stale-feed checks see the true book age.
+            # Fall back to `now_us` only if the entry has no update yet
+            # (defensive — `apply_snapshot` stamps `last_update_us` on every
+            # write).
+            book_ts_us = entry.last_update_us or now_us
             q = book_to_market_quote(
                 book=entry.book,
                 market_ticker=ticker,
@@ -458,7 +465,7 @@ class KalshiMarketSource:
                 reference_price=reference_price_by_asset.get(asset, Decimal("0")),
                 reference_60s_avg=reference_60s_avg_by_asset.get(asset, Decimal("0")),
                 fee_bps=fee_bps_by_ticker.get(ticker, Decimal("0")),
-                quote_timestamp_us=now_us,
+                quote_timestamp_us=book_ts_us,
                 depth_levels=self._config.depth_levels,
                 warning_flags=warnings,
             )

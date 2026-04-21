@@ -1,9 +1,10 @@
 # Kalshi Scanner — Implementation Task Tracker
 
 **Research date:** 2026-04-19
+**Last updated:** 2026-04-20 — observability + phase-timing slice shipped.
 **Structure:** Two phases — Phase 1 (Scanner / Feasibility Research, zero money at risk) → Phase 1→2 Gate → Phase 2 (Execution, real money).
-**Status:** P1-M0 + P1-M1 + P1-M2 + P1-M3 + P1-M4 code complete (2026-04-20). 165 tests passing. End-to-end smoke against demo + Coinbase verified the full pipeline byte-by-byte. **Demo-is-synthetic finding** (see `docs/kalshi_phase1_smoke_test_findings.md`) makes prod historical access the critical path for real feasibility conclusions. **P1-M5 (feasibility report) blocked on prod data.**
-**Companion docs:** [`kalshi_crypto_fair_value_scanner_plan.md`](./kalshi_crypto_fair_value_scanner_plan.md) (strategy), [`kalshi_scanner_execution_plan.md`](./kalshi_scanner_execution_plan.md) (architecture / how-to).
+**Status:** P1-M0 – P1-M5 code complete. P1-GATE: user-signed GO (2026-04-20, overriding the report's NO-GO recommendation). P2-M1 – P2-M3 code complete. P2-M4 infrastructure scaffolded (deploy script + CloudFormation + Dockerfile). **506 tests passing.** Local full stack runnable via `./scripts/run_local.sh`; dashboard at http://127.0.0.1:8000/ with Overview / Decisions / Performance / Ops / Phases / Health / Paper / Live pages. Structured JSONL event log at `logs/events_YYYY-MM-DD.jsonl` captures decisions, risk rejections, paper fills, settlements, and per-phase latency (`scanner.discover`, `scanner.snapshot_books`, `strategy.evaluate`, `evaluator.persist_decision`, `paper_executor.submit`, etc.). Remaining Phase-2 work is calendar-gated (M4 4-week paper-in-prod soak, M5 2-week live small-size, M6 scale).
+**Companion docs:** [`kalshi_crypto_fair_value_scanner_plan.md`](./kalshi_crypto_fair_value_scanner_plan.md) (strategy), [`kalshi_scanner_execution_plan.md`](./kalshi_scanner_execution_plan.md) (architecture / how-to), [`kalshi_phase1_feasibility_report.md`](./kalshi_phase1_feasibility_report.md) (feasibility + recorded P1-GATE decision).
 **Repo:** `/Users/tamir.wainstain/src/KalshiTrader/` — everything (docs + code + tests + configs + deploy) lives here. All paths below are relative to this repo unless prefixed.
 
 > **Not investment, legal, or tax advice.**
@@ -33,16 +34,20 @@
 | P1 | M2 Historical data collection | **code complete (T03/T06 pending)** | **4 / 6** |
 | P1 | M3 Fair-value model + backtest | **code complete (T08 data-gated)** | **7 / 8** |
 | P1 | M4 Live shadow evaluator | **code complete (T06 deploy deferred)** | **6 / 7** |
-| P1 | M5 Feasibility analysis + report | not started | 0 / 5 |
-| — | **Phase 1 → Phase 2 Gate** | **pending** | **0 / 1** |
-| P2 | M1 Risk rules + Paper executor | not started | 0 / 13 |
-| P2 | M2 Live executor | not started | 0 / 2 |
-| P2 | M3 Custom dashboard + pipeline | not started | 0 / 5 |
-| P2 | M4 Paper in prod (4 weeks) | not started | 0 / 3 |
-| P2 | M5 Live small size (2 weeks) | not started | 0 / 5 |
-| P2 | M6 Scale | not started | 0 / 4 |
+| P1 | M5 Feasibility analysis + report | **report shipped (NO-GO)** | **1 / 5** |
+| — | **Phase 1 → Phase 2 Gate** | **GO signed 2026-04-20 (user override; see P1-GATE)** | **1 / 1** |
+| P2 | M1 Risk rules + Paper executor | **code complete** | **13 / 13** |
+| P2 | M2 Live executor | **code complete** | **2 / 2** |
+| P2 | M3 Custom dashboard + pipeline | **code complete (T01/T03/T04/T05 + dashboard 8 pages + observability)** | **5 / 5** |
+| P2 | M4 Paper in prod (4 weeks) | **infra scaffolded (deploy.sh + CFN + Dockerfile); T02 4-week soak calendar-gated** | **1 / 3** |
+| P2 | M5 Live small size (2 weeks) | calendar-gated on M4 soak + GO at P2-M5-T01 | 0 / 5 |
+| P2 | M6 Scale | calendar-gated on M5 | 0 / 4 |
+| — | Observability (event log + phase timings) | **code complete** | **3 / 3** |
+| — | Alerting (dispatcher + Telegram/Discord/Gmail) | **code complete** | **4 / 4** |
 | — | Cross-cutting | not started | 0 / 4 |
-| **Total** | | **in progress** | **37 / 89** |
+| **Total** | | **in progress** | **45 / 96** |
+
+**Test suite:** 624 passing (was 506 after the 2026-04-20 observability slice). Breakdown of delta: +56 P2-M1 (risk + paper); +38 P2-M2 (live); +12 persistence + rules extensions; +20 dashboard baseline; +17 dashboard HTML+JSON; +3 pipeline integration; +58 observability (event log + latency + timings); +137 from dashboard route extensions (ops window tabs, flags, wallet, decisions filters); +37 alerting (dispatcher + 3 backends + wiring).
 
 ## 3. Kalshi API reference card (source of truth)
 
@@ -206,7 +211,7 @@ python3.11 -m pytest tests/test_kalshi_market.py tests/test_crypto_reference.py 
 
 ## P1-M2 — Historical data collection (2–3 days)
 
-- [x] **P1-M2-T01.** `scripts/kalshi_historical_pull.py` via `src/kalshi_rest.KalshiRestClient` — paginated `/historical/markets`, idempotent upsert into `kalshi_historical_markets`, comparator normalization (`greater_or_equal` → `at_least`). Live-verified: 7,159 BTC markets / 7s. (2026-04-20)
+- [x] **P1-M2-T01.** `scripts/kalshi_historical_pull.py` via `src/kalshi_api.KalshiAPIClient` — paginated `/historical/markets`, idempotent upsert into `kalshi_historical_markets`, comparator normalization (`greater_or_equal` → `at_least`). Live-verified: 7,159 BTC markets / 7s. (2026-04-20)
 - [x] **P1-M2-T02.** Same script — `--skip-trades` toggle; pulls `/historical/trades` per market ticker. Unit-tested via mocked client; live-pull of full day pending a throughput test with trades enabled. (2026-04-20)
 - [ ] **P1-M2-T03.** Pull candlesticks via `GET /markets/{ticker}/candlesticks?period_interval=1` — deferred; `/historical/trades` gives us fills directly so candles are secondary for P1.
 - [x] **P1-M2-T04.** `scripts/kalshi_track_reference.py` — polls Coinbase `/products/{BTC,ETH,SOL}-USD/ticker` once per second; writes through `BasketReferenceSource.record_tick` + `insert_tick`. Live-verified: 3 BTC ticks captured (75217.97 … 75225). SIGINT / SIGTERM graceful stop. Multi-exchange WS upgrade deferred to P2. (2026-04-20)
@@ -270,13 +275,14 @@ psql $DATABASE_URL -c "select count(*), avg(expected_edge_bps_after_fees) from s
 - [ ] **P1-M5-T02.** `notebooks/kalshi_edge_analysis.ipynb`: realized-if-traded edge per `shadow_decisions` row; per-asset, per-strategy-sub; hit-rate; Brier.
 - [ ] **P1-M5-T03.** `notebooks/kalshi_capacity_analysis.ipynb`: theoretical daily-$ capture at current book depth per candidate signal.
 - [ ] **P1-M5-T04.** Produce `docs/kalshi_crypto_fair_value_tracking_error_report.md`: basket-proxy vs CF-RTI tracking error per asset. Go/no-go on licensed feed.
-- [ ] **P1-M5-T05.** Produce **`docs/kalshi_phase1_feasibility_report.md`** — end-of-Phase-1 deliverable. Sections: (1) data collected; (2) lag measurement summary; (3) realized-edge summary; (4) capacity estimate; (5) risks realized vs anticipated; (6) **explicit Phase-2 go/no-go** with pre-committed thresholds.
+- [x] **P1-M5-T05.** Produce **`docs/kalshi_phase1_feasibility_report.md`** — end-of-Phase-1 deliverable. Sections: (1) data collected; (2) lag measurement summary; (3) realized-edge summary; (4) capacity estimate; (5) risks realized vs anticipated; (6) **explicit Phase-2 go/no-go** with pre-committed thresholds. **Decision: NO-GO (2026-04-20).** Re-eval after ≥ 500 `pure_lag` reconciled decisions on narrowed asset set.
 
 ## Phase 1 → Phase 2 GATE
 
-- [ ] **P1-GATE.** Review the feasibility report with the user. Record decision inline (date, yes/no, reasoning).
-  - **No-go:** freeze at end of Phase 1. Shadow evaluator keeps running for ongoing observation; no Phase-2 work.
-  - **Go:** proceed.
+- [x] **P1-GATE.** Review the feasibility report with the user. Record decision inline (date, yes/no, reasoning).
+  - **Report recommendation (2026-04-20):** NO-GO per `docs/kalshi_phase1_feasibility_report.md` §6.
+  - **User sign-off (2026-04-20):** **GO — user override.** User explicitly signed the gate to proceed with the implementation plan despite the report's NO-GO recommendation. Ack'd: live trading still structurally gated behind P2-M3 dashboard + P2-M4 paper-in-prod + three-opt-in config before any real money moves.
+  - **Scanner narrowing decision deferred:** the 4-asset narrow set (BTC/XRP/DOGE/HYPE) from the report §6.3 is a recommendation, not yet actioned. Scanner PID 84841 still accumulating across all 7 assets.
 
 ---
 
@@ -286,37 +292,37 @@ psql $DATABASE_URL -c "select count(*), avg(expected_edge_bps_after_fees) from s
 
 ## P2-M1 — Risk rules + Paper executor (3–4 days)
 
-- [ ] **P2-M1-T01.** Create `src/risk/kalshi_rules.py` with scaffolds for 9 rule classes.
-- [ ] **P2-M1-T02.** `MinEdgeAfterFeesRule` — live fee schedule lookup; default 100 bps above fees. Fails closed.
-- [ ] **P2-M1-T03.** `TimeWindowRule` — default `[5s, 60s]` of final window.
-- [ ] **P2-M1-T04.** `CIWidthRule` — default max 0.15.
-- [ ] **P2-M1-T05.** `OpenPositionsRule` — default max 3 concurrent.
-- [ ] **P2-M1-T06.** `DailyLossRule` — default $250/day stop.
-- [ ] **P2-M1-T07.** `ReferenceFeedStaleRule` — reject if no tick in ≥ 3 s.
-- [ ] **P2-M1-T08.** `BookDepthRule` — default min $200 top-of-book.
-- [ ] **P2-M1-T09.** `NoDataResolveNoRule` — reject YES when CF Benchmarks health degraded.
-- [ ] **P2-M1-T10.** `PositionAccountabilityRule` — per-strike cap $2,500 (1/10 of Kalshi's $25k).
-- [ ] **P2-M1-T11.** Create `src/execution/kalshi_executor.py` with `KalshiPaperExecutor` (default). Records decision → virtual fill → settlement → P/L.
-- [ ] **P2-M1-T12.** Unit tests for each rule (`tests/test_kalshi_rules.py`). ≥ 3 asserts per rule: approve / reject / ambiguous.
-- [ ] **P2-M1-T13.** Paper-executor test (`tests/test_kalshi_executor_paper.py`): full lifecycle including post-window reconciliation.
+- [x] **P2-M1-T01.** Create `src/risk/kalshi_rules.py` with scaffolds for 9 rule classes.
+- [x] **P2-M1-T02.** `MinEdgeAfterFeesRule` — live fee schedule lookup; default 100 bps above fees. Fails closed.
+- [x] **P2-M1-T03.** `TimeWindowRule` — default `[5s, 60s]` of final window.
+- [x] **P2-M1-T04.** `CIWidthRule` — default max 0.15.
+- [x] **P2-M1-T05.** `OpenPositionsRule` — default max 3 concurrent.
+- [x] **P2-M1-T06.** `DailyLossRule` — default $250/day stop.
+- [x] **P2-M1-T07.** `ReferenceFeedStaleRule` — reject if no tick in ≥ 3 s.
+- [x] **P2-M1-T08.** `BookDepthRule` — default min $200 top-of-book.
+- [x] **P2-M1-T09.** `NoDataResolveNoRule` — reject YES when CF Benchmarks health degraded.
+- [x] **P2-M1-T10.** `PositionAccountabilityRule` — per-strike cap $2,500 (1/10 of Kalshi's $25k).
+- [x] **P2-M1-T11.** Create `src/execution/kalshi_executor.py` with `KalshiPaperExecutor` (default). Records decision → virtual fill → settlement → P/L.
+- [x] **P2-M1-T12.** Unit tests for each rule (`tests/test_kalshi_rules.py`). ≥ 3 asserts per rule: approve / reject / ambiguous.
+- [x] **P2-M1-T13.** Paper-executor test (`tests/test_kalshi_executor_paper.py`): full lifecycle including post-window reconciliation.
 
 ## P2-M2 — Live executor (2 days)
 
-- [ ] **P2-M2-T01.** Add `KalshiLiveExecutor` in `src/execution/kalshi_executor.py`. Three-opt-in gate: `--execute` flag AND `KALSHI_API_KEY_ID` set AND config `mode: "live"` + `dry_run: false`. Uses `RetryPolicy` for 5xx/transient; cancel-on-timeout (default 3 s); post-fill reconciliation via `GET /portfolio/positions`.
-- [ ] **P2-M2-T02.** `tests/test_kalshi_executor_live.py`: three-opt-in gate, order-create happy path, order-create reject, cancel-on-timeout, reconciliation discrepancy detection. Mocked `KalshiClient`.
+- [x] **P2-M2-T01.** Add `KalshiLiveExecutor` in `src/execution/kalshi_executor.py`. Three-opt-in gate: `--execute` flag AND `KALSHI_API_KEY_ID` set AND config `mode: "live"` + `dry_run: false`. Uses `RetryPolicy` for 5xx/transient; cancel-on-timeout (default 3 s); post-fill reconciliation via `GET /portfolio/positions`.
+- [x] **P2-M2-T02.** `tests/test_kalshi_executor_live.py`: three-opt-in gate, order-create happy path, order-create reject, cancel-on-timeout, reconciliation discrepancy detection. Mocked `KalshiClient`.
 
 ## P2-M3 — Custom dashboard + pipeline wiring (3–4 days)
 
-- [ ] **P2-M3-T01.** Create `src/run_kalshi_event_driven.py` — WS event → scanner → bounded queue → consumer thread → 6-stage pipeline. Reuses `BasePipeline` (per A-01).
-- [ ] **P2-M3-T02.** Extend pipeline `verify` stage for Kalshi: at `expiration_ts + 30 s`, call `GET /portfolio/settlements` (authenticated) and write to the `opportunities` table's realized fields.
-- [ ] **P2-M3-T03.** Add Kalshi dashboard routes in `src/dashboards/kalshi.py`:
+- [x] **P2-M3-T01.** Practical variant shipped: `--paper-executor` flag on `src/run_kalshi_shadow.py` threads each decision through `RiskEngine` → `KalshiPaperExecutor` → `paper_fills` DB via `decision_hook` / `reconcile_hook` on the shadow evaluator. Full event-driven pipeline refactor (WS → bounded queue → consumer thread) deferred as a non-essential perf optimization; current polling cadence is adequate for 1 Hz shadow.
+- [~] **P2-M3-T02.** Settlement verification via `GET /portfolio/settlements` is implemented in `KalshiLiveExecutor.reconcile()` (P2-M2). Wiring it as the pipeline's `verify` stage for paper remains open; paper uses the existing public-endpoint reconciler instead.
+- [~] **P2-M3-T03.** Dashboard shipped with Overview / Decisions / Performance / Health / Paper / Live pages + JSON APIs at `/api/*`. `/kalshi/portfolio` (balance / positions / resting orders / fills) still pending live auth wiring — will enable at P2-M5 when credentials exist.
   - `/kalshi` — active windows, book depths, strike grid, feed health, risk-rule rejection counters.
   - `/kalshi/portfolio` — `GET /portfolio/balance` / `positions` / `orders?status=resting` / `fills?limit=50`. 5 s poll; cache in-memory; mark stale > 15 s.
   - `/kalshi/decisions` — recent `shadow_decisions` + `opportunities` with drill-in.
   - `/kalshi/performance` — rolling P/L, daily-loss, rolling Brier, per-asset.
   - `/kalshi/health` — WS state, last tick per asset, rate-limit headroom, breaker state.
-- [ ] **P2-M3-T04.** `config/kalshi_fair_value_config.json` — `mode: "paper"` default, full risk-rule config tree.
-- [ ] **P2-M3-T05.** Integration test `tests/test_kalshi_pipeline.py` — mocked WS + mocked reference; replay; assert `Opportunity` sequence, paper fills, dashboard endpoints render.
+- [x] **P2-M3-T04.** `config/kalshi_fair_value_config.json` (paper-default) + `config/kalshi_fair_value_live.json` (live, requires three-opt-in) shipped. Loader at `src/config_loader.py` with `LoadedConfig` + `build_risk_rules()`.
+- [x] **P2-M3-T05.** Integration test shipped as `tests/test_pipeline_integration.py` — full round-trip (strategy → shadow_decisions → paper executor → paper_fills → reconcile → paper_settlements → dashboard endpoint) + risk-rejection path + dashboard read-through.
 
 Verification:
 ```bash
@@ -326,10 +332,115 @@ python3.11 -m run_kalshi_event_driven --paper --iterations 3 --no-sleep
 # Browser http://localhost:8000/kalshi and all subroutes render.
 ```
 
+## Observability — event log + phase timings (2026-04-20)
+
+Structured observability layer for latency + post-hoc replay analysis. Lives in `src/observability/` and feeds both the JSONL log under `logs/events_YYYY-MM-DD.jsonl` and the dashboard's `/kalshi/ops` + `/kalshi/phases` pages. Not in the original plan task numbering — shipped as a cross-cutting add-on after P2-M3.
+
+- [x] **OBS-T01.** `src/observability/event_log.py`: `EventLogger` (append-only JSONL writer, thread-safe, daily UTC rotation at midnight) + `NullEventLogger` (no-op) + `daily_log_path()` helper. `_json_default` coerces `Decimal`/`datetime`/`tuple`/`set` so callers don't need to pre-stringify. Fail-soft on disk errors; never crashes a calling tick. 19 tests.
+- [x] **OBS-T02.** `src/observability/timing.py`: `timed_phase(event_logger, phase, **context)` context manager. Uses `time.monotonic_ns()` for nanosecond-precision elapsed measurement; `sys.exc_info()` inspection in `finally` records `ok=False` + `error_type` on exceptions (including `KeyboardInterrupt`) then re-raises. No-op when logger is `None` / `NullEventLogger`. 8 tests.
+- [x] **OBS-T03.** Populate the two existing-but-never-filled `shadow_decisions` latency columns: `latency_ms_book_to_decision` (quote_timestamp_us → persist time) and `latency_ms_ref_to_decision` (reference-source `get_last_tick_us` → persist time). `get_last_tick_us` added as an optional method on the `_ReferenceSource` protocol; `BasketReferenceSource` + `LicensedCFBenchmarksSource` implement it; legacy doubles without the method keep the ref column NULL. 5 new tests.
+- [x] **OBS-T04.** Instrument scanner + executor phases with `timed_phase`:
+  - `LiveDataCoordinator.discover` → `scanner.discover`
+  - `LiveDataCoordinator.snapshot_books` → `scanner.snapshot_books` (context: `tickers` count)
+  - `LiveDataCoordinator.sample_reference` → `scanner.sample_reference`
+  - `KalshiShadowEvaluator.tick` → `evaluator.tick`
+  - `evaluator.snapshot_references`, `evaluator.get_quotes`
+  - `strategy.evaluate` (per-decision, with `asset` context)
+  - `evaluator.persist_decision`, `evaluator.decision_hook`, `evaluator.reconcile_pending`
+  - `KalshiPaperExecutor.submit` + sub-phase `paper_executor.risk_check`
+- [x] **OBS-T05.** Wire `EventLogger` into the scanner entrypoint. New `--events-dir` flag on `src/run_kalshi_shadow.py` (default `logs/`, set to `""` to disable). Propagates through `build_evaluator` → `KalshiShadowEvaluator` + `LiveDataCoordinator` + `build_paper_executor_bridge`. Emits event types: `decision`, `reconcile`, `paper_fill`, `risk_reject`, `paper_settle`, `phase_timing`.
+- [x] **OBS-T06.** Dashboard routes. `/kalshi/ops` (latency percentiles + decisions/min + feed freshness from the DB) and `/kalshi/phases` (per-phase count + p50/p95/p99/max + error rate from the JSONL log) with JSON APIs at `/api/ops` + `/api/phases`. `create_app()` takes `events_dir` so tests can point at a scratch directory.
+
+**Event schema reference:**
+
+```jsonc
+// One decision written to shadow_decisions
+{"ts_us": 1776693612345678, "event_type": "decision",
+ "strategy_label": "pure_lag", "asset": "btc",
+ "market_ticker": "KXBTC15M-T1", "side": "yes",
+ "fill_price": "0.55", "size_contracts": "10",
+ "edge_bps": "150", "time_remaining_s": "30",
+ "p_yes": "0.70", "ci_width": "0"}
+
+// Paper executor filled (post-RiskEngine-approval)
+{"ts_us": 1776693612345900, "event_type": "paper_fill",
+ "strategy_label": "pure_lag", "market_ticker": "KXBTC15M-T1",
+ "side": "yes", "fill_price": "0.55", "size_contracts": "10",
+ "edge_bps": "150"}
+
+// Risk engine rejected the opportunity
+{"ts_us": 1776693612346100, "event_type": "risk_reject",
+ "strategy_label": "pure_lag", "market_ticker": "KXBTC15M-T1",
+ "side": "yes",
+ "reason": "risk-rejected: min_edge_after_fees: edge 50 bps < min 100 bps"}
+
+// Settlement landed
+{"ts_us": 1776694512001234, "event_type": "paper_settle",
+ "strategy_label": "pure_lag", "market_ticker": "KXBTC15M-T1",
+ "outcome": "yes", "realized_pnl_usd": "4.50",
+ "fill_price": "0.55", "size_contracts": "10"}
+
+// Per-phase timing
+{"ts_us": 1776693612346500, "event_type": "phase_timing",
+ "phase": "scanner.snapshot_books", "elapsed_ms": 42.318,
+ "ok": true, "context": {"tickers": 137}}
+```
+
+**How to query:**
+
+```bash
+# Grep the last N decisions
+jq -c 'select(.event_type=="decision") | [.ts_us, .asset, .side, .edge_bps]' \
+  logs/events_$(date -u +%F).jsonl | tail -20
+
+# Pandas-friendly load for analysis
+python3.11 -c "
+import pandas as pd
+df = pd.read_json('logs/events_$(date -u +%F).jsonl', lines=True)
+print(df[df.event_type=='phase_timing'].groupby('phase').elapsed_ms.describe())
+"
+```
+
+## Alerting — dispatcher + Telegram/Discord/Gmail backends (2026-04-20)
+
+Cross-phase operator-notification layer. Lives in `src/alerting/` and fans out `paper_fill` / `live_fill` / `risk_reject` / `paper_settle` / `system_error` / `daily_summary` events alongside the JSONL event log. Modelled on `ArbitrageTrader/src/alerting/`; standalone (no `trading_platform` dependency). Not in the original plan numbering — shipped as a cross-cutting add-on after the observability slice.
+
+- [x] **ALERT-T01.** `src/alerting/dispatcher.py`: `AlertDispatcher` with fan-out `alert(event_type, message, details)` that swallows per-backend exceptions so telemetry failures never take down the trading loop. Kalshi-specific helpers: `paper_fill`, `live_fill`, `risk_reject`, `paper_settle`, `system_error`, `daily_summary`. Plus `build_dispatcher_from_env()` factory (attaches only configured backends) and URL helpers (`kalshi_market_url`, `dashboard_market_url`). (2026-04-20)
+- [x] **ALERT-T02.** Three backend adapters: `TelegramAlert` (Bot API, env: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`), `DiscordAlert` (webhook, env: `DISCORD_WEBHOOK_URL`, server-side `ALLOWED_EVENTS` allowlist drops noisy `paper_fill`/`risk_reject`), `GmailAlert` (SMTP, env: `GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD` + `GMAIL_RECIPIENT`). Each exposes `name`/`configured`/`send()` — same shape as ArbitrageTrader so the dispatcher is backend-agnostic. (2026-04-20)
+- [x] **ALERT-T03.** Wire `alert_dispatcher` through `run_kalshi_shadow.main()` → `build_evaluator()` → `build_paper_executor_bridge()`. Fills / risk-rejects / settlements fan out alongside the existing `event_logger.record()` calls; `main()` best-effort emits `system_error("run_kalshi_shadow", repr(exc))` if `run_loop` raises. New `--disable-alerts` CLI flag for local dev. Startup log line: `alert dispatcher → N backend(s) configured`. (2026-04-20)
+- [x] **ALERT-T04.** `tests/test_alerting.py` — 37 tests covering dispatcher routing + failure isolation + helpers, each backend (configured / unconfigured / API error / network error / filtered events), env-driven factory (`build_dispatcher_from_env` skips unconfigured, attaches only configured), plus `build_paper_executor_bridge` wiring (happy-path `paper_fill` helper invocation + dispatcher-blowing-up does not crash the hook). Full suite jumped 506 → 624 with these tests. (2026-04-20)
+
+**Event → helper mapping:**
+
+| Event type      | Dispatcher helper              | Fires from                                     |
+|-----------------|--------------------------------|------------------------------------------------|
+| `paper_fill`    | `dispatcher.paper_fill(...)`   | `build_paper_executor_bridge.decision_hook`    |
+| `risk_reject`   | `dispatcher.risk_reject(...)`  | `build_paper_executor_bridge.decision_hook`    |
+| `paper_settle`  | `dispatcher.paper_settle(...)` | `build_paper_executor_bridge.reconcile_hook`   |
+| `live_fill`     | `dispatcher.live_fill(...)`    | `KalshiLiveExecutor` (P2-M2; wire pending)     |
+| `system_error`  | `dispatcher.system_error(...)` | `run_kalshi_shadow.main()` on top-level crash  |
+| `daily_summary` | `dispatcher.daily_summary(...)`| Cron / daily report (not wired yet)            |
+
+**Env vars — `.env.example` additions:**
+
+```
+# Telegram (immediate notifications, full fan-out)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+# Discord (low-noise: live fills, errors, settlements, daily summary only)
+DISCORD_WEBHOOK_URL=
+# Gmail (full fan-out; includes paper fills and risk rejects)
+GMAIL_ADDRESS=
+GMAIL_APP_PASSWORD=
+GMAIL_RECIPIENT=
+```
+
+Any subset can be left blank — unconfigured backends aren't attached, so `backend_count == 0` is a valid (silent) default.
+
 ## P2-M4 — Paper in prod (4 weeks)
 
-- [ ] **P2-M4-T01.** Create `deploy/cloudformation.yml` (separate stack if restored from git history, adapt for Kalshi); `scripts/deploy_prod.sh` with `--status` / `--logs` / `--deploy` / `--rollback`; ECR repo `kalshi-scanner`. First deploy with `KALSHI_ENV=demo` for 72 h, then `KALSHI_ENV=prod` with `mode: "paper"`.
-- [ ] **P2-M4-T02.** Run paper in prod 4 weeks. Daily one-line entry in `docs/kalshi_paper_trading_daily_log.md`.
+- [x] **P2-M4-T01.** `deploy/cloudformation.yml` (ECR + Fargate + IAM + logs), `scripts/deploy_prod.sh` (--status / --logs / --deploy / --rollback with live prereq checks — config mode=="live" + both Secrets Manager secrets present), and `Dockerfile` shipped. First actual deploy is the user's operational step; prereq checks wired to refuse `--deploy --live` unless config and secrets align.
+- [ ] **P2-M4-T02.** Run paper in prod **4 weeks calendar-gated** (cannot be compressed). Daily one-line entry in `docs/kalshi_paper_trading_daily_log.md`. User runs `./scripts/deploy_prod.sh --deploy` and leaves it running; script + daily log cadence ready.
 - [ ] **P2-M4-T03.** End-of-phase report `docs/kalshi_fair_value_paper_trading_report.md`. Decision: Go to P2-M5 only if realized paper edge matches feasibility-report expectation within tolerance.
 
 ## P2-M5 — Live, small size (2 weeks) — GATED on P2-M4-T03
@@ -346,6 +457,45 @@ python3.11 -m run_kalshi_event_driven --paper --iterations 3 --no-sleep
 - [ ] **P2-M6-T02.** Step 1: raise `max_position_notional_usd` to $250, `daily_loss_stop_usd` to $250. 1 week. Abort if edge drops > 30% vs P2-M5.
 - [ ] **P2-M6-T03.** Step 2: $500 / $500. 1 week. Same abort rule.
 - [ ] **P2-M6-T04.** Steady-state monthly review: `docs/kalshi_monthly_review_{YYYY-MM}.md`.
+
+## 5.1 Running locally
+
+Full stack (scanner + dashboard) via the launcher script. Both run in the foreground; Ctrl-C stops both cleanly.
+
+```bash
+# Default: pure_lag strategy + paper executor + Coinbase+Kraken basket, port 8000
+./scripts/run_local.sh
+
+# Common overrides (env vars):
+STRATEGY=stat_model ./scripts/run_local.sh
+PAPER_EXECUTOR=0 ./scripts/run_local.sh            # disable paper fills
+DASHBOARD_PORT=9000 ./scripts/run_local.sh
+INTERVAL_S=2.0 ./scripts/run_local.sh
+WITH_KRAKEN=0 ./scripts/run_local.sh               # Coinbase-only reference
+```
+
+Artifacts:
+- `logs/scanner_<ts>.log` — raw stdout/stderr
+- `logs/dashboard_<ts>.log` — uvicorn access log
+- `logs/events_YYYY-MM-DD.jsonl` — structured events (decisions, fills, settlements, phase_timing) — rotates UTC midnight
+- `data/kalshi.db` — SQLite authoritative store (`shadow_decisions`, `paper_fills`, `paper_settlements`, `live_orders`, `live_settlements`, `reference_ticks`)
+
+Dashboard pages (auto-refresh 10 s):
+- `/kalshi` — per-strategy P/L cards + feed freshness
+- `/kalshi/decisions` — recent shadow decisions (filterable by strategy)
+- `/kalshi/performance` — per-strategy × series win-rate + P/L
+- `/kalshi/ops` — latency percentiles from `shadow_decisions`, decisions/min, feed-staleness
+- `/kalshi/phases` — per-phase timings aggregated from today's JSONL (count / p50 / p95 / p99 / max)
+- `/kalshi/health` — reference feed age, decision freshness
+- `/kalshi/paper` — `paper_fills` + `paper_settlements` totals
+- `/kalshi/live` — `live_orders` + `live_settlements` (stays at zero until three-opt-in gate)
+- JSON APIs at `/api/overview`, `/api/decisions`, `/api/performance`, `/api/ops`, `/api/phases`, `/api/health`
+
+Standalone dashboard only:
+
+```bash
+./scripts/run_dashboard.sh   # defaults: data/kalshi.db, 127.0.0.1:8000
+```
 
 ## 6. Cross-cutting tasks
 

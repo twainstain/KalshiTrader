@@ -1,0 +1,62 @@
+{
+  "_comment": "LIVE TRADING CONFIG. Loading this file does NOT by itself enable live trading — the KalshiLiveExecutor also requires: (1) --execute CLI flag, (2) KALSHI_API_KEY_ID env var set, (3) mode=='live' here, (4) dry_run=false. All four must align.",
+  "mode": "live",
+  "dry_run": false,
+  "database_url": "${DATABASE_URL}",
+
+  "strategy": {
+    "primary": "pure_lag",
+    "pure_lag": {
+      "move_threshold_bps": "5",
+      "rolling_window_us": 5000000,
+      "min_edge_bps_after_fees": "150",
+      "min_book_depth_usd": "200",
+      "time_window_seconds": [5, 60],
+      "hypothetical_size_contracts": "10",
+      "min_fill_price": "0.15"
+    }
+  },
+
+  "_asset_note": "Per feasibility report §6.3: narrow to BTC/XRP/DOGE/HYPE. Drop BNB (lag unexploitable); de-prioritize ETH/SOL until they turn live-positive.",
+  "assets": ["btc", "xrp", "doge", "hype"],
+
+  "reference": {
+    "coinbase_ws": true,
+    "kraken_ws": true,
+    "basket_median": true,
+    "ws_staleness_threshold_s": 3
+  },
+
+  "risk": {
+    "_comment": "Tightened vs paper — P2-M5 starts with 1 concurrent position and $100/day loss stop per plan §7.",
+    "min_edge_after_fees_bps": "150",
+    "time_window_s": [5, 60],
+    "max_ci_width": "0.15",
+    "max_concurrent_positions": 1,
+    "daily_loss_stop_usd": "100",
+    "reference_feed_max_stale_s": "2",
+    "book_depth_min_usd": "300",
+    "position_accountability_usd_per_strike": "100",
+    "strike_proximity_min_bps": "15"
+  },
+
+  "execution": {
+    "live_executor_enabled": true,
+    "cancel_timeout_s": 3.0,
+    "max_position_notional_usd": "100",
+    "order_size_contracts": 10
+  },
+
+  "runtime": {
+    "tick_interval_s": 1.0,
+    "discover_every_ticks": 30,
+    "reconcile_delay_s": 30,
+    "log_level": "info"
+  },
+
+  "secrets": {
+    "_comment": "In prod deploy, these resolve from AWS Secrets Manager via the IAM role.",
+    "kalshi_api_key_id_secret": "kalshi/prod/api-key-id",
+    "kalshi_private_key_pem_secret": "kalshi/prod/private-key-pem"
+  }
+}

@@ -3,15 +3,15 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
-data/*.json
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/polymarket.db*
-data/polymarket_replay/
-logs/*.log
-logs/*.jsonl
-logs/polymarket/
+# Runtime data — SQLite DBs, JSON snapshots, replay fixtures. Never checked in.
+data/
+
+# Log files (plain .log + structured .jsonl event log).
+logs/
+
+# Claude Code memory — session context + feedback snapshots. Personal,
+# not for git. Restore manually if onboarding a new machine.
+memory/
 .DS_Store
 tmp_*.html
 .claude/

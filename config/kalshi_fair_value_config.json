@@ -1,0 +1,69 @@
+{
+  "_comment": "Default paper-mode config. Phase-2 live config lives in config/kalshi_fair_value_live.json and requires three-opt-in gate. Schema is intentionally flat so env-vars can override with dot-path flags.",
+  "mode": "paper",
+  "dry_run": true,
+  "database_url": "sqlite:///data/kalshi.db",
+
+  "strategy": {
+    "primary": "pure_lag",
+    "also_pure_lag": false,
+    "also_partial_avg": false,
+    "pure_lag": {
+      "move_threshold_bps": "3",
+      "rolling_window_us": 5000000,
+      "min_edge_bps_after_fees": "100",
+      "min_book_depth_usd": "50",
+      "time_window_seconds": [5, 60],
+      "hypothetical_size_contracts": "10",
+      "min_fill_price": "0.10"
+    },
+    "stat_model": {
+      "min_edge_bps_after_fees": "300",
+      "max_ci_width": "1.0",
+      "min_book_depth_usd": "50",
+      "time_window_seconds": [120, 900]
+    },
+    "partial_avg": {
+      "min_edge_bps_after_fees": "300",
+      "max_ci_width": "1.0",
+      "min_book_depth_usd": "50",
+      "time_window_seconds": [120, 900]
+    }
+  },
+
+  "assets": ["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"],
+
+  "reference": {
+    "coinbase_ws": true,
+    "kraken_ws": true,
+    "basket_median": true,
+    "ws_staleness_threshold_s": 5
+  },
+
+  "risk": {
+    "_comment": "Thresholds consumed by risk.kalshi_rules.default_rules(). Empty / missing keys use the rule class default.",
+    "min_edge_after_fees_bps": "100",
+    "time_window_s": [5, 60],
+    "max_ci_width": "0.15",
+    "max_concurrent_positions": 3,
+    "daily_loss_stop_usd": "250",
+    "reference_feed_max_stale_s": "3",
+    "book_depth_min_usd": "200",
+    "position_accountability_usd_per_strike": "2500",
+    "strike_proximity_min_bps": "10"
+  },
+
+  "execution": {
+    "_comment": "Paper mode: hypothetical fills only. Live requires three-opt-in gate at a different config file.",
+    "paper_executor_enabled": true,
+    "cancel_timeout_s": 3.0,
+    "order_size_contracts": 10
+  },
+
+  "runtime": {
+    "tick_interval_s": 1.0,
+    "discover_every_ticks": 30,
+    "reconcile_delay_s": 30,
+    "log_level": "info"
+  }
+}

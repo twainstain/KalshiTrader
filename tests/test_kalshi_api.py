@@ -1,4 +1,4 @@
-"""Cover `src/kalshi_rest.py` — signing, request plumbing, cursor pagination."""
+"""Cover `src/kalshi_api.py` — signing, request plumbing, cursor pagination."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from kalshi_rest import (
-    KalshiRestClient,
+from kalshi_api import (
+    KalshiAPIClient,
     REST_HOSTS,
     load_private_key,
     sign_message,
@@ -82,22 +82,22 @@ def test_load_private_key_non_rsa_rejected(tmp_path):
 
 def test_client_rejects_unknown_env(rsa_key):
     with pytest.raises(ValueError, match="demo|prod"):
-        KalshiRestClient(api_key_id="x", private_key=rsa_key, env="staging")
+        KalshiAPIClient(api_key_id="x", private_key=rsa_key, env="staging")
 
 
 def test_from_env_requires_key_id_and_pem(monkeypatch, pem_file):
     monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
     monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", str(pem_file))
     with pytest.raises(RuntimeError, match="KALSHI_API_KEY_ID"):
-        KalshiRestClient.from_env()
+        KalshiAPIClient.from_env()
     monkeypatch.setenv("KALSHI_API_KEY_ID", "id-x")
     monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "/nope/missing.pem")
     with pytest.raises(RuntimeError, match="KALSHI_PRIVATE_KEY_PATH"):
-        KalshiRestClient.from_env()
+        KalshiAPIClient.from_env()
 
 
 def test_auth_headers_populate_three_required_headers(rsa_key):
-    c = KalshiRestClient(api_key_id="id-abc", private_key=rsa_key, env="demo")
+    c = KalshiAPIClient(api_key_id="id-abc", private_key=rsa_key, env="demo")
     h = c._auth_headers("GET", "/trade-api/v2/portfolio/balance")
     assert h["KALSHI-ACCESS-KEY"] == "id-abc"
     assert h["KALSHI-ACCESS-TIMESTAMP"].isdigit()
@@ -119,7 +119,7 @@ def _mock_response(status: int, body: dict | None = None, text: str = ""):
 def test_request_authenticates_by_default(rsa_key):
     session = MagicMock()
     session.request.return_value = _mock_response(200, {"ok": True})
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     c.request("GET", "/portfolio/balance")
     args, kwargs = session.request.call_args
@@ -129,7 +129,7 @@ def test_request_authenticates_by_default(rsa_key):
 def test_request_skips_auth_when_public(rsa_key):
     session = MagicMock()
     session.request.return_value = _mock_response(200, {})
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     c.request("GET", "/exchange/schedule", authenticated=False)
     _, kwargs = session.request.call_args
@@ -139,7 +139,7 @@ def test_request_skips_auth_when_public(rsa_key):
 def test_request_raises_kalshi_api_error_on_4xx(rsa_key):
     session = MagicMock()
     session.request.return_value = _mock_response(429, text="rate limited")
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     with pytest.raises(KalshiAPIError) as exc:
         c.request("GET", "/portfolio/balance")
@@ -151,7 +151,7 @@ def test_request_raises_on_transport_error(rsa_key):
     import requests
     session = MagicMock()
     session.request.side_effect = requests.ConnectionError("boom")
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     with pytest.raises(KalshiAPIError) as exc:
         c.request("GET", "/portfolio/balance")
@@ -166,7 +166,7 @@ def test_paginate_follows_cursor_and_yields_items(rsa_key):
         _mock_response(200, {"markets": [{"t": 1}], "cursor": "pg2"}),
         _mock_response(200, {"markets": [{"t": 2}, {"t": 3}], "cursor": ""}),
     ]
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     out = list(c.paginate("GET", "/historical/markets", collection_key="markets"))
     assert [m["t"] for m in out] == [1, 2, 3]
@@ -178,7 +178,7 @@ def test_paginate_follows_cursor_and_yields_items(rsa_key):
 def test_paginate_stops_when_max_pages_reached(rsa_key):
     session = MagicMock()
     session.request.return_value = _mock_response(200, {"markets": [{"t": 1}], "cursor": "x"})
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     out = list(c.paginate(
         "GET", "/historical/markets",
@@ -190,7 +190,7 @@ def test_paginate_stops_when_max_pages_reached(rsa_key):
 def test_historical_markets_passes_series_filter(rsa_key):
     session = MagicMock()
     session.request.return_value = _mock_response(200, {"markets": [], "cursor": ""})
-    c = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo",
+    c = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo",
                          session=session)
     list(c.historical_markets(series_ticker="KXBTC15M", min_close_ts=1, max_close_ts=2))
     _, kwargs = session.request.call_args
@@ -201,7 +201,7 @@ def test_historical_markets_passes_series_filter(rsa_key):
 
 
 def test_host_mapping_for_demo_and_prod(rsa_key):
-    c_demo = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="demo")
-    c_prod = KalshiRestClient(api_key_id="k", private_key=rsa_key, env="prod")
+    c_demo = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="demo")
+    c_prod = KalshiAPIClient(api_key_id="k", private_key=rsa_key, env="prod")
     assert c_demo.host == REST_HOSTS["demo"]
     assert c_prod.host == REST_HOSTS["prod"]

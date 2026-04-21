@@ -33,6 +33,7 @@ from core.models import (
     OpportunityStatus,
     ZERO,
 )
+from observability.timing import timed_phase
 from strategy.kalshi_fair_value import (
     FairValueModel,
     KalshiFairValueStrategy,
@@ -54,6 +55,10 @@ class _MarketSource(Protocol):
 class _ReferenceSource(Protocol):
     def get_spot(self, asset: str) -> Decimal | None: ...
     def get_60s_avg(self, asset: str) -> Decimal | None: ...
+    # Optional — older reference sources may not expose this. The evaluator
+    # `getattr`s it rather than requiring it so legacy doubles keep working.
+    # Returns microsecond timestamp of the most recent tick, or None.
+    # def get_last_tick_us(self, asset: str) -> int | None: ...
 
 
 class _ResolutionLookup(Protocol):
@@ -88,9 +93,10 @@ INSERT INTO shadow_decisions (
     best_yes_ask, best_no_ask, book_depth_yes_usd, book_depth_no_usd,
     recommended_side, hypothetical_fill_price, hypothetical_size_contracts,
     expected_edge_bps_after_fees, fee_bps_at_decision,
-    latency_ms_ref_to_decision, latency_ms_book_to_decision
+    latency_ms_ref_to_decision, latency_ms_book_to_decision,
+    strategy_label
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 SQL_UPDATE_REALIZED = """
@@ -140,10 +146,15 @@ class KalshiShadowEvaluator:
         resolution_lookup: _ResolutionLookup | None = None,
         config: ShadowConfig | None = None,
         now_us: Callable[[], int] | None = None,
+        strategy_label: str = "stat_model",
+        decision_hook: Callable[[MarketQuote, Opportunity], None] | None = None,
+        reconcile_hook: Callable[[str, str], None] | None = None,
+        event_logger: Any = None,   # `observability.event_log.EventLogger`-shaped
     ) -> None:
         self._market_source = market_source
         self._reference_source = reference_source
         self._strategy = strategy or KalshiFairValueStrategy(FairValueModel())
+        self._strategy_label = strategy_label
         # Don't use `x or {}` — when caller passes an empty-but-shared dict
         # (as the run-loop coordinator does, populating it later), `or` would
         # dereference to a fresh empty dict and break the shared-mutation
@@ -157,37 +168,78 @@ class KalshiShadowEvaluator:
         self._config = config or ShadowConfig()
         self._now_us = now_us or (lambda: int(time.time() * 1_000_000))
         self._pending_reconcile: dict[str, _PendingReconcile] = {}
+        self._decision_hook = decision_hook
+        self._reconcile_hook = reconcile_hook
+        # EventLogger is duck-typed — tests pass a stub with a `record()` method.
+        # `None` is fine; `_emit()` short-circuits in that case.
+        self._event_logger = event_logger
 
     # ---- per-tick ----
 
     def tick(self) -> dict[str, int]:
         """One pass: score quotes, write decisions, attempt reconciliation."""
+        with timed_phase(self._event_logger, "evaluator.tick",
+                         strategy=self._strategy_label):
+            return self._tick_impl()
+
+    def _tick_impl(self) -> dict[str, int]:
         written = 0
         reconciled = 0
 
-        spot_by_asset = self._snapshot_references("spot")
-        avg_by_asset = self._snapshot_references("60s_avg")
+        with timed_phase(self._event_logger, "evaluator.snapshot_references"):
+            spot_by_asset = self._snapshot_references("spot")
+            avg_by_asset = self._snapshot_references("60s_avg")
 
-        quotes = self._market_source.get_quotes(
-            reference_price_by_asset=spot_by_asset,
-            reference_60s_avg_by_asset=avg_by_asset,
-            fee_bps_by_ticker=self._effective_fee_bps(),
-            market_meta_by_ticker=self._market_meta,
-        )
+        with timed_phase(self._event_logger, "evaluator.get_quotes"):
+            quotes = self._market_source.get_quotes(
+                reference_price_by_asset=spot_by_asset,
+                reference_60s_avg_by_asset=avg_by_asset,
+                fee_bps_by_ticker=self._effective_fee_bps(),
+                market_meta_by_ticker=self._market_meta,
+            )
 
         for q in quotes:
             asset = self._asset_by_ticker.get(q.market_ticker)
             if asset is None:
                 continue
-            opp = self._strategy.evaluate(q, asset=asset)
+            with timed_phase(self._event_logger, "strategy.evaluate",
+                             strategy=self._strategy_label, asset=asset):
+                opp = self._strategy.evaluate(q, asset=asset)
             if opp is None:
                 continue
-            if self._persist_decision(q, opp):
+            with timed_phase(self._event_logger, "evaluator.persist_decision",
+                             strategy=self._strategy_label,
+                             ticker=q.market_ticker):
+                persisted = self._persist_decision(q, opp, asset)
+            if persisted:
                 written += 1
+                self._emit(
+                    "decision",
+                    strategy_label=self._strategy_label,
+                    asset=asset,
+                    market_ticker=q.market_ticker,
+                    side=opp.recommended_side,
+                    fill_price=opp.hypothetical_fill_price,
+                    size_contracts=opp.hypothetical_size_contracts,
+                    edge_bps=opp.expected_edge_bps_after_fees,
+                    time_remaining_s=q.time_remaining_s,
+                    p_yes=opp.p_yes,
+                    ci_width=opp.ci_width,
+                )
+            if self._decision_hook is not None:
+                with timed_phase(self._event_logger, "evaluator.decision_hook",
+                                 strategy=self._strategy_label,
+                                 ticker=q.market_ticker):
+                    try:
+                        self._decision_hook(q, opp)
+                    except Exception as e:  # noqa: BLE001 — don't let a hook crash the tick
+                        logger.warning("decision_hook failed: %s", e)
             self._register_reconcile(q)
 
         if self._conn is not None and self._resolve is not None:
-            reconciled = self._reconcile_pending()
+            with timed_phase(self._event_logger, "evaluator.reconcile_pending",
+                             strategy=self._strategy_label):
+                reconciled = self._reconcile_pending()
 
         return {"written": written, "reconciled": reconciled}
 
@@ -218,10 +270,32 @@ class KalshiShadowEvaluator:
             out.setdefault(ticker, self._config.fee_bps_default)
         return out
 
-    def _persist_decision(self, quote: MarketQuote, opp: Opportunity) -> bool:
+    def _persist_decision(
+        self, quote: MarketQuote, opp: Opportunity, asset: str,
+    ) -> bool:
         if self._conn is None:
             return False
         now_us = self._now_us()
+        # latency_ms_book_to_decision: age of the Kalshi book snapshot.
+        book_to_dec_ms = (now_us - int(quote.quote_timestamp_us)) / 1000.0
+        # latency_ms_ref_to_decision: age of the most recent reference tick
+        # for this asset. `get_last_tick_us` is optional on the reference
+        # protocol (see docstring); older doubles return None and the
+        # column stays NULL. We require an int return type — MagicMock's
+        # auto-attribute behavior returns a MagicMock which isinstance-fails
+        # and cleanly short-circuits to None.
+        ref_ts_us: int | None = None
+        getter = getattr(self._reference_source, "get_last_tick_us", None)
+        if callable(getter):
+            try:
+                raw = getter(asset)
+                if isinstance(raw, int):
+                    ref_ts_us = raw
+            except Exception:  # noqa: BLE001 — never crash the tick on latency capture
+                ref_ts_us = None
+        ref_to_dec_ms = (
+            (now_us - ref_ts_us) / 1000.0 if ref_ts_us is not None else None
+        )
         row = (
             quote.market_ticker, now_us,
             str(opp.p_yes), str(opp.ci_width),
@@ -234,8 +308,9 @@ class KalshiShadowEvaluator:
             str(opp.hypothetical_size_contracts),
             str(opp.expected_edge_bps_after_fees),
             str(quote.fee_bps),
-            None,  # latency_ms_ref_to_decision — populated in P1-M5 when timestamps are captured
-            None,  # latency_ms_book_to_decision
+            None if ref_to_dec_ms is None else f"{ref_to_dec_ms:.3f}",
+            f"{book_to_dec_ms:.3f}",
+            self._strategy_label,
         )
         stmt = SQL_INSERT
         if self._is_postgres:
@@ -252,6 +327,15 @@ class KalshiShadowEvaluator:
         exp_s = int(quote.expiration_ts)
         if ticker not in self._pending_reconcile:
             self._pending_reconcile[ticker] = _PendingReconcile(expiration_ts=exp_s)
+
+    def _emit(self, event_type: str, **fields: Any) -> None:
+        """Fire-and-forget event record. Swallows errors."""
+        if self._event_logger is None:
+            return
+        try:
+            self._event_logger.record(event_type, **fields)
+        except Exception as e:  # noqa: BLE001 — never crash the tick
+            logger.warning("event_logger.record failed: %s", e)
 
     def _reconcile_pending(self) -> int:
         """Try to settle outstanding markets whose expiry + delay has passed."""
@@ -283,6 +367,17 @@ class KalshiShadowEvaluator:
                 continue  # not yet resolved; leave pending
             done += self._apply_realized(ticker, realized.lower())
             self._pending_reconcile.pop(ticker, None)
+            self._emit(
+                "reconcile",
+                market_ticker=ticker,
+                outcome=realized.lower(),
+                strategy_label=self._strategy_label,
+            )
+            if self._reconcile_hook is not None:
+                try:
+                    self._reconcile_hook(ticker, realized.lower())
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("reconcile_hook failed: %s", e)
         return done
 
     def _apply_realized(self, ticker: str, outcome: str) -> int:

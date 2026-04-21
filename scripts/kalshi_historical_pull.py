@@ -10,7 +10,7 @@ Usage:
     python3.11 scripts/kalshi_historical_pull.py --days 7 --asset btc --verbose
     python3.11 scripts/kalshi_historical_pull.py --days 1 --asset btc --dry-run
 
-The script uses `src/kalshi_rest.KalshiRestClient` (direct requests + RSA-PSS
+The script uses `src/kalshi_api.KalshiAPIClient` (direct requests + RSA-PSS
 signing) rather than `kalshi_python_sync`, whose pydantic models reject the
 demo environment's nullable-int fields.
 """
@@ -36,7 +36,7 @@ for rel in ("src", "scripts"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from kalshi_rest import KalshiRestClient  # noqa: E402
+from kalshi_api import KalshiAPIClient  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ def insert_trade(conn: Any, trade: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def pull_markets(
-    client: KalshiRestClient, *,
+    client: KalshiAPIClient, *,
     series: Iterable[str], min_close_ts: int, max_close_ts: int,
     conn: Any | None = None, dry_run: bool = False,
 ) -> list[dict]:
@@ -225,7 +225,7 @@ def pull_markets(
 
 
 def pull_trades(
-    client: KalshiRestClient, *,
+    client: KalshiAPIClient, *,
     markets: Iterable[dict],
     conn: Any | None = None, dry_run: bool = False,
 ) -> int:
@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     min_close_ts = now_s - args.days * 86_400
     max_close_ts = now_s
 
-    client = KalshiRestClient.from_env()
+    client = KalshiAPIClient.from_env()
     series = _series_for_asset(args.asset)
 
     url = (args.database_url or os.environ.get("DATABASE_URL")

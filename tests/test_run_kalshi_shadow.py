@@ -226,6 +226,76 @@ def test_discover_survives_rest_failure_per_series():
     assert len(coord.market_meta) == len(rks.ASSET_FROM_SERIES) - 1
 
 
+def test_discover_prunes_tickers_that_drop_out_of_open_status():
+    """Regression: when a ticker stops appearing in /markets?status=open
+    (15-min window closed), it must be removed from `_market_meta` and
+    `_asset_by_ticker` so `snapshot_books()` stops hitting its orderbook
+    endpoint. Previously, the evaluator kept writing decisions on the stale
+    book with last-known `time_remaining_s`.
+    """
+    rest = MagicMock()
+    call_count = {"n": 0}
+
+    def _fake(method, path, **kwargs):
+        series = kwargs["params"]["series_ticker"]
+        if call_count["n"] == 0:
+            # First pass: BTC has ticker A.
+            if series == "KXBTC15M":
+                return {"markets": [_market_payload(
+                    ticker="KXBTC15M-A", event_ticker="KXBTC15M-A-EV",
+                )]}
+            return {"markets": []}
+        else:
+            # Second pass: BTC's ticker A has rolled out; B is now open.
+            if series == "KXBTC15M":
+                return {"markets": [_market_payload(
+                    ticker="KXBTC15M-B", event_ticker="KXBTC15M-B-EV",
+                )]}
+            return {"markets": []}
+
+    rest.request.side_effect = _fake
+    coord = _mk_coord(rest)
+
+    coord.discover()
+    assert "KXBTC15M-A" in coord.market_meta
+    assert coord.asset_by_ticker["KXBTC15M-A"] == "btc"
+
+    call_count["n"] = 1
+    coord.discover()
+    # A must be pruned; B must be present.
+    assert "KXBTC15M-A" not in coord.market_meta
+    assert "KXBTC15M-A" not in coord.asset_by_ticker
+    assert "KXBTC15M-B" in coord.market_meta
+    assert coord.asset_by_ticker["KXBTC15M-B"] == "btc"
+
+
+def test_discover_does_not_prune_on_rest_failure_for_that_series():
+    """If /markets fails for a series (HTTP exception), existing tickers
+    for that series must be preserved — transient network errors shouldn't
+    wipe catalog state. Only an explicit empty-response prunes."""
+    rest = MagicMock()
+    call_count = {"n": 0}
+
+    def _fake(method, path, **kwargs):
+        series = kwargs["params"]["series_ticker"]
+        if call_count["n"] == 0 and series == "KXBTC15M":
+            return {"markets": [_market_payload(ticker="KXBTC15M-OLD")]}
+        if call_count["n"] == 1 and series == "KXBTC15M":
+            raise RuntimeError("transient network error")
+        return {"markets": []}
+
+    rest.request.side_effect = _fake
+    coord = _mk_coord(rest)
+    coord.discover()
+    assert "KXBTC15M-OLD" in coord.market_meta
+
+    call_count["n"] = 1
+    coord.discover()
+    # Transient failure preserves the ticker; it's not in the response but
+    # the response itself was an exception, not an empty list.
+    assert "KXBTC15M-OLD" in coord.market_meta
+
+
 def test_discover_uses_status_open_not_active():
     """Regression: status=active is not valid per Kalshi API."""
     rest = _dispatching_rest(_market_payload())
@@ -359,6 +429,8 @@ def test_run_loop_honors_iterations_cap(tmp_path):
     # Minimal mocks — evaluator returns zero every tick.
     ev = MagicMock()
     ev.tick.return_value = {"written": 0, "reconciled": 0}
+    ev.pure_lag_partner = None
+    ev.partners = []
 
     totals = rks.run_loop(
         evaluator=ev, coordinator=None,
@@ -372,6 +444,8 @@ def test_run_loop_stops_on_stop_event():
     import threading
     ev = MagicMock()
     ev.tick.return_value = {"written": 0, "reconciled": 0}
+    ev.pure_lag_partner = None
+    ev.partners = []
     stop = threading.Event()
     stop.set()
     totals = rks.run_loop(
@@ -387,6 +461,8 @@ def test_run_loop_calls_coordinator_per_tick():
     coord = MagicMock()
     ev = MagicMock()
     ev.tick.return_value = {"written": 1, "reconciled": 0}
+    ev.pure_lag_partner = None
+    ev.partners = []  # no side-by-side partner in this test
     totals = rks.run_loop(
         evaluator=ev, coordinator=coord,
         iterations=3, interval_s=0, no_sleep=True,

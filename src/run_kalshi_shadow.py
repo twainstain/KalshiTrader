@@ -47,6 +47,9 @@ from execution.kalshi_shadow_evaluator import (  # noqa: E402
     KalshiShadowEvaluator,
     ShadowConfig,
 )
+from execution.kalshi_paper_executor import KalshiPaperExecutor  # noqa: E402
+from observability.event_log import EventLogger, NullEventLogger  # noqa: E402
+from observability.timing import timed_phase  # noqa: E402
 from market.coinbase_ws import CoinbaseWSReference, make_ws_reference_fetcher  # noqa: E402
 from market.crypto_reference import BasketReferenceSource, ReferenceTick  # noqa: E402
 from market.kalshi_market import (  # noqa: E402
@@ -54,8 +57,13 @@ from market.kalshi_market import (  # noqa: E402
     KalshiMarketSource,
     book_to_market_quote,
 )
+from risk.kalshi_rules import RiskContext, RiskEngine, default_rules  # noqa: E402
 from strategy.kalshi_fair_value import (  # noqa: E402
     FairValueModel, KalshiFairValueStrategy, StrategyConfig,
+)
+from strategy.pure_lag import PureLagStrategy, PureLagConfig  # noqa: E402
+from strategy.partial_avg_fair_value import (  # noqa: E402
+    PartialAvgFairValueModel, PartialAvgFairValueStrategy,
 )
 
 
@@ -112,6 +120,8 @@ class LiveDataCoordinator:
         market_source: KalshiMarketSource,
         reference_source: BasketReferenceSource,
         market_limit_per_series: int = 50,
+        event_logger: Any = None,
+        flags_poller: Any = None,
     ) -> None:
         self._rest = rest_client
         self._fetch_reference = reference_fetcher
@@ -121,10 +131,26 @@ class LiveDataCoordinator:
         self._market_meta: dict[str, dict] = {}
         self._asset_by_ticker: dict[str, str] = {}
         self._fee_bps_by_ticker: dict[str, Decimal] = {}
+        self._event_logger = event_logger
+        # Optional runtime-flags poller; when absent every asset is scanned.
+        self._flags_poller = flags_poller
 
     def discover(self) -> None:
         """Refresh the active-markets catalog. Called less often than per-tick."""
+        with timed_phase(self._event_logger, "scanner.discover"):
+            return self._discover_impl()
+
+    def _discover_impl(self) -> None:
+        flags = self._flags_poller.get() if self._flags_poller else None
         for series, asset in ASSET_FROM_SERIES.items():
+            if flags is not None and not flags.is_asset_scan_enabled(asset):
+                # Also drop any previously-discovered tickers for the asset
+                # so the per-tick book snapshot loop stops hitting them.
+                stale = [t for t, a in self._asset_by_ticker.items() if a == asset]
+                for t in stale:
+                    self._market_meta.pop(t, None)
+                    self._asset_by_ticker.pop(t, None)
+                continue
             try:
                 # Kalshi's valid /markets status values are `open`, `unopened`,
                 # `settled`. Use `open` (actively trading) for shadow scoring.
@@ -137,10 +163,19 @@ class LiveDataCoordinator:
             except Exception as e:  # noqa: BLE001 — log + keep going
                 logger.warning("discover %s failed: %s", series, e)
                 continue
+            # Track which tickers the current discover call actually saw, so
+            # we can prune tickers that rolled out of `status=open` (i.e. the
+            # 15-min window closed). Without this, stale tickers linger in
+            # `_market_meta` forever and `snapshot_books()` keeps hitting
+            # their `/orderbook` endpoint — and when that fails, the evaluator
+            # still sees the last pre-close book and writes decisions on an
+            # already-closed market.
+            seen: set[str] = set()
             for m in (resp or {}).get("markets", []) or []:
                 ticker = m.get("ticker")
                 if not ticker:
                     continue
+                seen.add(ticker)
                 raw_comparator = (m.get("strike_type") or "above").lower()
                 comparator = COMPARATOR_MAP.get(raw_comparator, raw_comparator)
                 # `close_time` is the 15-min window boundary (what we care
@@ -158,9 +193,25 @@ class LiveDataCoordinator:
                     "asset": asset,
                 }
                 self._asset_by_ticker[ticker] = asset
+            # Prune this series' tickers that weren't in the response. Only
+            # touch entries whose `asset` matches — other series' tickers
+            # might not have been refreshed this iteration.
+            stale = [
+                t for t, meta in self._market_meta.items()
+                if meta.get("asset") == asset and t not in seen
+            ]
+            for t in stale:
+                self._market_meta.pop(t, None)
+                self._asset_by_ticker.pop(t, None)
+                self._fee_bps_by_ticker.pop(t, None)
 
     def snapshot_books(self) -> None:
         """Pull the latest orderbook for every known ticker."""
+        with timed_phase(self._event_logger, "scanner.snapshot_books",
+                         tickers=len(self._market_meta)):
+            return self._snapshot_books_impl()
+
+    def _snapshot_books_impl(self) -> None:
         for ticker in list(self._market_meta.keys()):
             try:
                 resp = self._rest.request(
@@ -188,7 +239,15 @@ class LiveDataCoordinator:
             )
 
     def sample_reference(self) -> None:
-        """Poll Coinbase once per asset and feed the basket source."""
+        """Poll Coinbase once per asset and feed the basket source.
+
+        Also feeds the PureLagStrategy's per-asset rolling-price history if
+        `lag_strategy` has been registered via `attach_lag_strategy()`.
+        """
+        with timed_phase(self._event_logger, "scanner.sample_reference"):
+            return self._sample_reference_impl()
+
+    def _sample_reference_impl(self) -> None:
         for asset in set(ASSET_FROM_SERIES.values()):
             price = self._fetch_reference(asset)
             if price is None:
@@ -197,6 +256,22 @@ class LiveDataCoordinator:
                 asset=asset, price=price, ts_us=int(time.time() * 1_000_000),
                 src="coinbase_live",
             ))
+            for strat in getattr(self, "_tick_sinks", ()):
+                strat.record_reference_tick(asset, price)
+
+    def attach_lag_strategy(self, lag_strategy: PureLagStrategy) -> None:
+        """Register a PureLagStrategy so `sample_reference()` feeds its
+        rolling-price history with every reference tick.
+        """
+        self.attach_tick_sink(lag_strategy)
+
+    def attach_tick_sink(self, strategy) -> None:
+        """Register any strategy with a `record_reference_tick(asset, price)`
+        method so `sample_reference()` feeds it per tick.
+        """
+        if not hasattr(self, "_tick_sinks") or self._tick_sinks is None:
+            self._tick_sinks = []
+        self._tick_sinks.append(strategy)
 
     @property
     def market_meta(self) -> dict[str, dict]:
@@ -308,11 +383,158 @@ def open_connection(url: str) -> tuple[Any, bool]:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def build_paper_executor_bridge(
+    *, conn: Any, is_postgres: bool, strategy_label: str,
+    now_us: Callable[[], int] | None = None,
+    event_logger: Any = None,
+    flags_poller: Any = None,
+    alert_dispatcher: Any = None,
+) -> tuple[KalshiPaperExecutor, Callable[[Any, Any], None], Callable[[str, str], None]]:
+    """Build a paper executor + the (decision_hook, reconcile_hook) pair the
+    shadow evaluator invokes. The risk engine uses the config-default rule set.
+
+    `event_logger` (optional) — `EventLogger`-shaped. Emits `paper_fill`,
+    `risk_reject`, and `paper_settle` events so the JSONL log captures the
+    full decision → fill → settlement lineage.
+
+    `alert_dispatcher` (optional) — `AlertDispatcher`-shaped. When supplied,
+    paper fills / risk rejects / settlements additionally fan out to every
+    registered alert backend (Telegram / Discord / Gmail). Never raises — a
+    failing backend is logged and swallowed so the trading loop stays up.
+    """
+    risk_engine = RiskEngine(default_rules())
+    executor = KalshiPaperExecutor(
+        risk_engine=risk_engine,
+        conn=conn, is_postgres=is_postgres,
+        strategy_label=strategy_label,
+        now_us=now_us,
+    )
+    import time as _t
+    _get_now = now_us or (lambda: int(_t.time() * 1_000_000))
+
+    def _record(event_type: str, **fields) -> None:
+        if event_logger is None:
+            return
+        try:
+            event_logger.record(event_type, **fields)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("event_logger.record failed: %s", e)
+
+    def _alert(method_name: str, *args, **kwargs) -> None:
+        if alert_dispatcher is None:
+            return
+        try:
+            getattr(alert_dispatcher, method_name)(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 — telemetry must not crash caller
+            logger.warning("alert_dispatcher.%s failed: %s", method_name, e)
+
+    def decision_hook(quote, opp) -> None:
+        # Runtime enforcement: short-circuit before touching the risk
+        # engine or executor. Two levels of gate, evaluated in order:
+        #   1. `execution_kill_switch` — global panic button.
+        #   2. `execution_enabled[asset]` — per-asset granular toggle.
+        # Both are operator-driven via the dashboard's controls card.
+        if flags_poller is not None:
+            cur = flags_poller.get()
+            # `MarketQuote` has no `asset` field — derive via the series
+            # prefix. Previously this used `getattr(opp.quote, "asset", None)`
+            # which always returned empty, silently bypassing the per-asset
+            # `execution_enabled` toggle.
+            asset = ASSET_FROM_SERIES.get(opp.quote.series_ticker, "")
+            if cur.execution_kill_switch:
+                _record(
+                    "execution_kill_switch_blocked",
+                    strategy_label=strategy_label,
+                    market_ticker=opp.quote.market_ticker,
+                    asset=asset,
+                )
+                return
+            if asset and not cur.is_asset_execution_enabled(asset):
+                _record(
+                    "execution_disabled_for_asset",
+                    strategy_label=strategy_label,
+                    market_ticker=opp.quote.market_ticker,
+                    asset=asset,
+                )
+                return
+        # Build a fresh RiskContext from the executor's snapshots each tick
+        # (same round-trip pattern as TestRiskContextIntegration).
+        ctx = RiskContext(
+            now_us=_get_now(),
+            # Reference tick ts isn't available here cheaply; use the quote's
+            # timestamp as a proxy — the ReferenceFeedStaleRule then sees
+            # the book-vs-clock gap rather than ref-vs-clock. Acceptable for
+            # shadow/paper; live uses a real ReferenceSource.
+            last_reference_tick_us=quote.quote_timestamp_us,
+            open_positions=executor.open_positions(),
+            daily_realized_pnl_usd=executor.daily_realized_pnl(),
+            position_notional_by_strike_usd=executor.notional_by_strike(),
+        )
+        result = executor.submit(opp, ctx)
+        if result.success:
+            _record(
+                "paper_fill",
+                strategy_label=strategy_label,
+                market_ticker=opp.quote.market_ticker,
+                side=opp.recommended_side,
+                fill_price=opp.hypothetical_fill_price,
+                size_contracts=opp.hypothetical_size_contracts,
+                edge_bps=opp.expected_edge_bps_after_fees,
+            )
+            _alert(
+                "paper_fill",
+                opp.quote.market_ticker, opp.recommended_side,
+                opp.hypothetical_fill_price,
+                opp.hypothetical_size_contracts,
+                edge_bps=opp.expected_edge_bps_after_fees,
+                strategy_label=strategy_label,
+            )
+        else:
+            _record(
+                "risk_reject",
+                strategy_label=strategy_label,
+                market_ticker=opp.quote.market_ticker,
+                side=opp.recommended_side,
+                reason=result.reason,
+            )
+            _alert(
+                "risk_reject",
+                opp.quote.market_ticker, opp.recommended_side, result.reason,
+                strategy_label=strategy_label,
+            )
+
+    def reconcile_hook(ticker: str, outcome: str) -> None:
+        settlements = executor.reconcile(ticker, outcome)
+        for s in settlements:
+            _record(
+                "paper_settle",
+                strategy_label=strategy_label,
+                market_ticker=ticker,
+                outcome=outcome,
+                realized_pnl_usd=s.realized_pnl_usd,
+                fill_price=s.fill.fill_price,
+                size_contracts=s.fill.size_contracts,
+            )
+            _alert(
+                "paper_settle", ticker, outcome, s.realized_pnl_usd,
+                strategy_label=strategy_label,
+            )
+
+    return executor, decision_hook, reconcile_hook
+
+
 def build_evaluator(
     *, conn: Any, is_postgres: bool,
     rest_client: Any,
     reference_fetcher: Callable[[str], Decimal | None],
     strategy_config: StrategyConfig | None = None,
+    also_pure_lag: bool = False,
+    also_partial_avg: bool = False,
+    primary_strategy: str = "stat_model",
+    paper_executor: bool = False,
+    event_logger: Any = None,
+    flags_poller: Any = None,
+    alert_dispatcher: Any = None,
 ) -> tuple[KalshiShadowEvaluator, LiveDataCoordinator]:
     """Wire everything together. Not called from tests."""
     market_source = KalshiMarketSource(KalshiMarketConfig())
@@ -331,14 +553,38 @@ def build_evaluator(
         min_book_depth_usd=Decimal("50"),
         time_window_seconds=(120, 900),            # skip final 2 min (0% wins)
     )
-    strategy = KalshiFairValueStrategy(FairValueModel(), cfg)
-
     coordinator = LiveDataCoordinator(
         rest_client=rest_client,
         reference_fetcher=reference_fetcher,
+        event_logger=event_logger,
         market_source=market_source,
         reference_source=reference_source,
+        flags_poller=flags_poller,
     )
+    if primary_strategy == "pure_lag":
+        lag_primary = PureLagStrategy(PureLagConfig())
+        coordinator.attach_tick_sink(lag_primary)
+        strategy = lag_primary
+        label = "pure_lag"
+    elif primary_strategy == "partial_avg":
+        pa_primary = PartialAvgFairValueStrategy(
+            PartialAvgFairValueModel(), cfg,
+        )
+        coordinator.attach_tick_sink(pa_primary)
+        strategy = pa_primary
+        label = "partial_avg"
+    else:
+        strategy = KalshiFairValueStrategy(FairValueModel(), cfg)
+        label = "stat_model"
+    decision_hook = None
+    reconcile_hook = None
+    if paper_executor:
+        _, decision_hook, reconcile_hook = build_paper_executor_bridge(
+            conn=conn, is_postgres=is_postgres, strategy_label=label,
+            event_logger=event_logger,
+            flags_poller=flags_poller,
+            alert_dispatcher=alert_dispatcher,
+        )
     evaluator = KalshiShadowEvaluator(
         market_source=market_source,
         reference_source=reference_source,
@@ -349,7 +595,49 @@ def build_evaluator(
         conn=conn, is_postgres=is_postgres,
         resolution_lookup=build_resolution_lookup(rest_client),
         config=ShadowConfig(),
+        strategy_label=label,
+        decision_hook=decision_hook,
+        reconcile_hook=reconcile_hook,
+        event_logger=event_logger,
     )
+    # Side-by-side partner evaluators share the same coordinator + sources.
+    # Each partner.tick() runs per loop iteration; strategy_label tags
+    # the decision rows so all three are separable in `shadow_decisions`.
+    evaluator.partners = []  # type: ignore[attr-defined]
+    if also_pure_lag:
+        lag_strategy = PureLagStrategy(PureLagConfig())
+        coordinator.attach_tick_sink(lag_strategy)
+        evaluator.partners.append(KalshiShadowEvaluator(  # type: ignore[attr-defined]
+            market_source=market_source,
+            reference_source=reference_source,
+            strategy=lag_strategy,
+            market_meta_by_ticker=coordinator.market_meta,
+            asset_by_ticker=coordinator.asset_by_ticker,
+            fee_bps_by_ticker=coordinator.fee_bps_by_ticker,
+            conn=conn, is_postgres=is_postgres,
+            resolution_lookup=build_resolution_lookup(rest_client),
+            config=ShadowConfig(),
+            strategy_label="pure_lag",
+        ))
+    if also_partial_avg:
+        # Uses same StrategyConfig as stat_model so edge floors / depth
+        # gates are identical — the sole difference is the pricing model.
+        pa_strategy = PartialAvgFairValueStrategy(
+            PartialAvgFairValueModel(), cfg,
+        )
+        coordinator.attach_tick_sink(pa_strategy)
+        evaluator.partners.append(KalshiShadowEvaluator(  # type: ignore[attr-defined]
+            market_source=market_source,
+            reference_source=reference_source,
+            strategy=pa_strategy,
+            market_meta_by_ticker=coordinator.market_meta,
+            asset_by_ticker=coordinator.asset_by_ticker,
+            fee_bps_by_ticker=coordinator.fee_bps_by_ticker,
+            conn=conn, is_postgres=is_postgres,
+            resolution_lookup=build_resolution_lookup(rest_client),
+            config=ShadowConfig(),
+            strategy_label="partial_avg",
+        ))
     return evaluator, coordinator
 
 
@@ -362,8 +650,15 @@ def run_loop(
     no_sleep: bool,
     stop_event: threading.Event | None = None,
     discover_every: int = 30,
+    flags_poller: Any = None,
 ) -> dict[str, int]:
-    """Drive the evaluator. Returns per-tick aggregate counts."""
+    """Drive the evaluator. Returns per-tick aggregate counts.
+
+    `flags_poller` (optional): when supplied, each loop tick reads the
+    current flags. Strategies flagged disabled get their tick() skipped
+    (evaluator still polls data; only scoring is suppressed). Assets
+    flagged disabled get filtered out by the coordinator's discover().
+    """
     stop = stop_event or threading.Event()
 
     def _handler(signum, _frame):
@@ -377,6 +672,11 @@ def run_loop(
             pass
 
     totals = {"ticks": 0, "written": 0, "reconciled": 0}
+    partners = list(getattr(evaluator, "partners", []) or [])
+    # Backwards-compat: older code set `pure_lag_partner` singular.
+    legacy_partner = getattr(evaluator, "pure_lag_partner", None)
+    if legacy_partner is not None and legacy_partner not in partners:
+        partners.append(legacy_partner)
     i = 0
     while not stop.is_set():
         if coordinator is not None and (i % discover_every == 0):
@@ -384,9 +684,24 @@ def run_loop(
         if coordinator is not None:
             coordinator.snapshot_books()
             coordinator.sample_reference()
-        result = evaluator.tick()
-        totals["written"] += result.get("written", 0)
-        totals["reconciled"] += result.get("reconciled", 0)
+        flags = flags_poller.get() if flags_poller is not None else None
+
+        def _strategy_on(ev: Any) -> bool:
+            if flags is None:
+                return True
+            label = getattr(ev, "_strategy_label", None) or getattr(ev, "strategy_label", None)
+            return flags.is_strategy_enabled(label) if label else True
+
+        if _strategy_on(evaluator):
+            result = evaluator.tick()
+            totals["written"] += result.get("written", 0)
+            totals["reconciled"] += result.get("reconciled", 0)
+        for p in partners:
+            if not _strategy_on(p):
+                continue
+            r = p.tick()
+            totals["written"] += r.get("written", 0)
+            totals["reconciled"] += r.get("reconciled", 0)
         totals["ticks"] += 1
         i += 1
         if iterations is not None and i >= iterations:
@@ -408,6 +723,38 @@ def main(argv: list[str] | None = None) -> int:
                         help="Don't open a DB connection; skip persistence.")
     parser.add_argument("--no-ws", action="store_true",
                         help="Disable Coinbase WS; fall back to REST ticker polling.")
+    parser.add_argument("--primary-strategy",
+                        choices=("stat_model", "partial_avg", "pure_lag"),
+                        default="stat_model",
+                        help="Primary strategy of the main evaluator. "
+                             "Decisions tagged with strategy_label=<choice>.")
+    parser.add_argument("--also-pure-lag", action="store_true",
+                        help="Run a PureLagStrategy evaluator side-by-side; "
+                             "decisions tagged with strategy_label='pure_lag'.")
+    parser.add_argument("--also-partial-avg", action="store_true",
+                        help="Run a PartialAvgFairValueStrategy evaluator "
+                             "side-by-side; tagged 'partial_avg'.")
+    parser.add_argument("--with-kraken", action="store_true",
+                        help="Add Kraken WS as a 2nd reference source "
+                             "(basket-median with Coinbase). Helps BNB.")
+    parser.add_argument("--paper-executor", action="store_true",
+                        help="Route every approvable decision through the "
+                             "RiskEngine + KalshiPaperExecutor. Fills go to "
+                             "paper_fills; settlements to paper_settlements. "
+                             "Zero $ at risk; paper is default.")
+    parser.add_argument("--events-dir", default="logs",
+                        help="Directory for the structured JSONL event log. "
+                             "Default: logs/. Set to '' to disable.")
+    parser.add_argument("--flags-path", default="config/runtime_flags.json",
+                        help="Runtime-flags JSON file. Dashboard writes here, "
+                             "runner polls it every 2s. Default: "
+                             "config/runtime_flags.json.")
+    parser.add_argument("--disable-alerts", action="store_true",
+                        help="Skip building the alert dispatcher. By default "
+                             "the runner builds one from env (TELEGRAM_*, "
+                             "DISCORD_WEBHOOK_URL, GMAIL_*); only configured "
+                             "backends attach, so this flag is mostly useful "
+                             "for forcing silence in local dev.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -423,13 +770,13 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     # Lazy import — avoids requiring the SDK in pure-unit-test runs.
-    from kalshi_rest import KalshiRestClient
+    from kalshi_api import KalshiAPIClient
     # For Phase-1 shadow evaluator we only hit PUBLIC endpoints (/markets,
     # /markets/{ticker}/orderbook). These live only on the prod host —
     # demo.kalshi.co doesn't carry the CRYPTO15M product families. Force
     # `env=prod` here regardless of `.env`; authenticated endpoints stay
     # untouched so the demo key is still what gets signed if we ever flip.
-    rest_client = KalshiRestClient.from_env(env="prod")
+    rest_client = KalshiAPIClient.from_env(env="prod")
 
     url = (args.database_url or os.environ.get("DATABASE_URL")
            or "sqlite:///data/kalshi.db")
@@ -437,38 +784,98 @@ def main(argv: list[str] | None = None) -> int:
     is_pg = False
     if not args.dry_run:
         conn, is_pg = open_connection(url)
+        # Install the ops-events sink so REST retries / WS reconnects /
+        # other emitters land in the dashboard's `ops_events` table.
+        # Postgres is supported by the runner but the sink is sqlite-only
+        # for now — emits silently no-op on pg until we extend the sink.
+        if not is_pg:
+            import ops_events
+            ops_events.set_sink(ops_events.db_sink(url))
+            ops_events.emit("runner", "info", "scanner started",
+                            {"pid": os.getpid(), "argv": sys.argv[1:]})
 
     # Coinbase WS for sub-second reference prices. Falls back to REST ticker
     # when the WS cache is older than `staleness_threshold_us` (5s default).
     # This addresses the "0% win rate at T<60s" finding from
     # docs/kalshi_shadow_live_capture_results.md §6.
-    ws = None
+    ws_sources: list = []
     fetcher = default_coinbase_fetcher
     if not args.no_ws:
-        ws = CoinbaseWSReference(
+        cb_ws = CoinbaseWSReference(
             assets=tuple(set(ASSET_FROM_SERIES.values())),
         )
-        ws.start()
-        fetcher = make_ws_reference_fetcher(
-            ws, staleness_threshold_us=5_000_000,  # 5 seconds
-            rest_fallback=default_coinbase_fetcher,
+        cb_ws.start()
+        ws_sources.append(("coinbase", cb_ws))
+        if args.with_kraken:
+            from market.kraken_ws import KrakenWSReference
+            kraken_ws = KrakenWSReference(
+                assets=tuple(a for a in ASSET_FROM_SERIES.values() if a != "hype"),
+            )
+            kraken_ws.start()
+            ws_sources.append(("kraken", kraken_ws))
+
+        if len(ws_sources) >= 2:
+            from market.basket_ws import BasketWSReference, make_basket_fetcher
+            basket = BasketWSReference(dict(ws_sources))
+            fetcher = make_basket_fetcher(basket, rest_fallback=default_coinbase_fetcher)
+        else:
+            fetcher = make_ws_reference_fetcher(
+                cb_ws, staleness_threshold_us=5_000_000,
+                rest_fallback=default_coinbase_fetcher,
+            )
+
+    if args.events_dir:
+        event_logger: Any = EventLogger(
+            base_dir=args.events_dir, rotate_daily=True,
         )
+        logger.info("event log → %s", event_logger.current_path())
+    else:
+        event_logger = NullEventLogger()
+
+    from runtime_flags import FlagsPoller
+    flags_poller = FlagsPoller(args.flags_path, interval_s=2.0)
+    logger.info("runtime flags → %s", args.flags_path)
+
+    alert_dispatcher: Any = None
+    if not args.disable_alerts:
+        from alerting.dispatcher import build_dispatcher_from_env
+        alert_dispatcher = build_dispatcher_from_env()
+        logger.info("alert dispatcher → %d backend(s) configured",
+                    alert_dispatcher.backend_count)
 
     evaluator, coordinator = build_evaluator(
         conn=conn, is_postgres=is_pg,
         rest_client=rest_client,
         reference_fetcher=fetcher,
+        also_pure_lag=args.also_pure_lag,
+        also_partial_avg=args.also_partial_avg,
+        primary_strategy=args.primary_strategy,
+        paper_executor=args.paper_executor,
+        event_logger=event_logger,
+        flags_poller=flags_poller,
+        alert_dispatcher=alert_dispatcher,
     )
     try:
         totals = run_loop(
             evaluator=evaluator, coordinator=coordinator,
             iterations=args.iterations, interval_s=args.interval_s,
             no_sleep=args.no_sleep,
+            flags_poller=flags_poller,
         )
         logger.info("exit totals: %s", totals)
+    except Exception as exc:
+        if alert_dispatcher is not None:
+            try:
+                alert_dispatcher.system_error("run_kalshi_shadow", repr(exc))
+            except Exception:  # noqa: BLE001
+                pass
+        raise
     finally:
-        if ws is not None:
-            ws.stop(timeout=5.0)
+        for _, ws in ws_sources:
+            try:
+                ws.stop(timeout=5.0)
+            except Exception:
+                pass
         if conn is not None:
             conn.close()
     return 0

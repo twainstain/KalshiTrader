@@ -151,6 +151,11 @@ KalshiTrader/
       repository.py                        # typed accessors for all tables
     dashboards/
       kalshi.py                            # [P2] FastAPI routes under /kalshi/*
+    alerting/
+      dispatcher.py                        # AlertDispatcher + build_dispatcher_from_env + URL helpers
+      telegram.py                          # TelegramAlert backend (Bot API)
+      discord.py                           # DiscordAlert backend (webhook, allowlisted events)
+      gmail.py                             # GmailAlert backend (SMTP)
     platform_adapters.py                   # CircuitBreaker / RetryPolicy / Queue adapters + KalshiAPIError
     env.py                                 # env-var loader
     run_kalshi_shadow.py                   # [P1] shadow-evaluator prod entrypoint
@@ -176,9 +181,43 @@ KalshiTrader/
     test_kalshi_executor_paper.py          # P2
     test_kalshi_executor_live.py           # P2
     test_kalshi_pipeline.py                # P2
+    test_alerting.py                       # dispatcher + Telegram/Discord/Gmail backends
   deploy/
     cloudformation.yml                     # [P2] spot EC2, security group, IAM, ECR
 ```
+
+## 4a. Alerting (cross-phase)
+
+Every paper / live fill, risk rejection, settlement, and top-level runner crash should fan out to any configured operator-notification backend. Modelled on the ArbitrageTrader `src/alerting/` package.
+
+**Module:** `src/alerting/`.
+
+- `dispatcher.py` — `AlertDispatcher.alert(event_type, message, details)` iterates registered backends and swallows per-backend errors (a broken Telegram endpoint must never take down the trading loop). Kalshi-specific convenience helpers: `paper_fill`, `live_fill`, `risk_reject`, `paper_settle`, `system_error`, `daily_summary`. Exports `build_dispatcher_from_env()` which attaches only configured backends, plus URL helpers (`kalshi_market_url`, `dashboard_market_url`).
+- `telegram.py` — `TelegramAlert` via Bot API. Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- `discord.py` — `DiscordAlert` via webhook. Env: `DISCORD_WEBHOOK_URL`. Applies a server-side allowlist (`live_fill`, `system_error`, `paper_settle`, `daily_summary`) so noisy shadow-mode events (`paper_fill`, `risk_reject`) stay off Discord without every call site having to route per-backend.
+- `gmail.py` — `GmailAlert` via SMTP. Env: `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `GMAIL_RECIPIENT`.
+
+**Wiring.** `run_kalshi_shadow.main()` calls `build_dispatcher_from_env()` (unless `--disable-alerts`) and threads the dispatcher through `build_evaluator(...)` → `build_paper_executor_bridge(...)`. Fills / risk-rejects / settlements fan out alongside the `EventLogger.record()` calls that already emit to `logs/events_*.jsonl`. If `run_loop` raises, `main()` best-effort calls `dispatcher.system_error("run_kalshi_shadow", repr(exc))` before re-raising.
+
+Alerts are **additive, fire-and-forget telemetry.** They do not gate trading, do not carry risk semantics, and must never raise into the caller.
+
+**Env vars** — add to `.env.example`:
+
+```
+# Telegram (immediate notifications)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+# Discord (low-noise: live fills, errors, daily summary only)
+DISCORD_WEBHOOK_URL=
+# Gmail (full fan-out, including paper fills and risk rejects)
+GMAIL_ADDRESS=
+GMAIL_APP_PASSWORD=
+GMAIL_RECIPIENT=
+```
+
+Any subset may be left blank — unconfigured backends aren't attached, so `backend_count == 0` is a valid (silent) state.
+
+**Tests.** `tests/test_alerting.py` covers the dispatcher (routing, failure isolation, helpers), each backend (configured / unconfigured / API error / network error), the env-driven factory, and the `build_paper_executor_bridge` wiring (fills fan out to the dispatcher; a blowing-up dispatcher does not crash the hook).
 
 ## 5. Milestones — sequenced execution
 

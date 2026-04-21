@@ -284,6 +284,51 @@ def test_source_apply_snapshot_and_get_quotes():
     assert q.reference_price == Decimal("64999.50")
 
 
+def test_source_quote_timestamp_reflects_book_update_not_read_time():
+    """Regression: `quote_timestamp_us` must be the book's `last_update_us`
+    so downstream latency accounting (`latency_ms_book_to_decision`) and the
+    paper-executor's stale-feed proxy see the true book age. Previously the
+    timestamp was stamped with `now_us` at read time, making every quote
+    look fresh even on multi-second-old books.
+    """
+    clock = _FakeClock()
+    src = km.KalshiMarketSource(
+        km.KalshiMarketConfig(stale_book_seconds=60.0),  # avoid stale warning
+        now_us=clock,
+    )
+    src.apply_snapshot(
+        "KXBTC15M-T",
+        {"yes": [["0.40", "5"]], "no": [["0.60", "5"]]},
+    )
+    src.update_lifecycle("KXBTC15M-T", status="active", time_remaining_s=45)
+
+    # The book was stamped at the clock's t0.
+    with src._books_lock:
+        t_book = src._books["KXBTC15M-T"].last_update_us
+
+    # Advance the clock by 2.5 s and read quotes.
+    clock.advance(2.5)
+    t_read = clock()
+    assert t_read - t_book == 2_500_000
+
+    quotes = src.get_quotes(
+        reference_price_by_asset={"btc": Decimal("1")},
+        reference_60s_avg_by_asset={"btc": Decimal("1")},
+        fee_bps_by_ticker={"KXBTC15M-T": Decimal("0")},
+        market_meta_by_ticker={
+            "KXBTC15M-T": {
+                "series_ticker": "KXBTC15M", "event_ticker": "E",
+                "strike": "1", "comparator": "above",
+                "expiration_ts": 0, "asset": "btc",
+            },
+        },
+    )
+    assert len(quotes) == 1
+    # The quote must carry the BOOK's timestamp, not the read time.
+    assert quotes[0].quote_timestamp_us == t_book
+    assert quotes[0].quote_timestamp_us != t_read
+
+
 def test_source_marks_stale_book_via_warning_flag():
     clock = _FakeClock()
     src = km.KalshiMarketSource(km.KalshiMarketConfig(stale_book_seconds=1.0),

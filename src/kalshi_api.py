@@ -35,6 +35,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
 from platform_adapters import KalshiAPIError
+import ops_events
 
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ def load_private_key(path: str | Path) -> RSAPrivateKey:
 
 
 @dataclass
-class KalshiRestClient:
+class KalshiAPIClient:
     """Authenticated Kalshi REST client."""
     api_key_id: str
     private_key: RSAPrivateKey
@@ -87,7 +88,7 @@ class KalshiRestClient:
     @classmethod
     def from_env(cls, *, env: str | None = None,
                  api_key_id: str | None = None,
-                 private_key_path: str | Path | None = None) -> "KalshiRestClient":
+                 private_key_path: str | Path | None = None) -> "KalshiAPIClient":
         import os
         env = env or os.environ.get("KALSHI_ENV", "demo")
         key_id = api_key_id or os.environ.get("KALSHI_API_KEY_ID", "")
@@ -143,9 +144,23 @@ class KalshiRestClient:
                 json=json_body, timeout=self.timeout_s,
             )
         except requests.RequestException as e:
+            ops_events.emit(
+                "kalshi_rest", "error",
+                f"transport error: {method} {path}",
+                {"error": str(e), "url": url},
+            )
             raise KalshiAPIError(f"transport error: {e}", status=None) from e
 
         if resp.status_code >= 400:
+            # 4xx is usually a caller bug; 5xx is Kalshi trouble. Both
+            # matter for ops visibility, but we bucket the severity so
+            # the dashboard can filter 5xx bursts from ordinary 404s.
+            level = "error" if resp.status_code >= 500 else "warn"
+            ops_events.emit(
+                "kalshi_rest", level,
+                f"{method} {path} → {resp.status_code}",
+                {"status": resp.status_code, "body": resp.text[:500]},
+            )
             raise KalshiAPIError(
                 f"{method} {path} → {resp.status_code}",
                 status=resp.status_code, response_body=resp.text[:2000],
@@ -185,6 +200,11 @@ class KalshiRestClient:
             call_params["cursor"] = cursor
         logger.warning("paginate(%s) hit max_pages=%d — stopping early",
                        path, max_pages)
+        ops_events.emit(
+            "kalshi_rest", "warn",
+            f"paginate({path}) hit max_pages — truncated",
+            {"path": path, "max_pages": max_pages},
+        )
 
     def get_exchange_schedule(self) -> dict:
         return self.request("GET", "/exchange/schedule", authenticated=False)
@@ -221,3 +241,92 @@ class KalshiRestClient:
             "GET", "/historical/trades", params=params,
             collection_key="trades",
         )
+
+    # ---- order lifecycle (P2-M2) ----
+
+    def create_order(
+        self, *,
+        ticker: str,
+        action: str,                # "buy" | "sell"
+        side: str,                  # "yes" | "no"
+        count: int,
+        client_order_id: str,
+        order_type: str = "limit",
+        yes_price: int | None = None,     # in cents (Kalshi convention)
+        no_price: int | None = None,
+        expiration_ts: int | None = None,
+    ) -> dict:
+        """POST /portfolio/orders.
+
+        `client_order_id` is an idempotency key — Kalshi rejects duplicates
+        with the same key, so retry is safe. Prices are in integer cents
+        (e.g. 55 = $0.55). Either `yes_price` or `no_price` is set
+        depending on `side`.
+        """
+        if action not in ("buy", "sell"):
+            raise ValueError(f"action must be buy|sell, got {action!r}")
+        if side not in ("yes", "no"):
+            raise ValueError(f"side must be yes|no, got {side!r}")
+        if count <= 0:
+            raise ValueError(f"count must be positive, got {count}")
+        if yes_price is None and no_price is None:
+            raise ValueError("one of yes_price/no_price must be provided")
+        body: dict[str, Any] = {
+            "ticker": ticker,
+            "action": action,
+            "side": side,
+            "count": count,
+            "type": order_type,
+            "client_order_id": client_order_id,
+        }
+        if yes_price is not None:
+            body["yes_price"] = int(yes_price)
+        if no_price is not None:
+            body["no_price"] = int(no_price)
+        if expiration_ts is not None:
+            body["expiration_ts"] = int(expiration_ts)
+        return self.request(
+            "POST", "/portfolio/orders", json_body=body, authenticated=True,
+        )
+
+    def cancel_order(self, order_id: str) -> dict:
+        """DELETE /portfolio/orders/{order_id}."""
+        return self.request(
+            "DELETE", f"/portfolio/orders/{order_id}", authenticated=True,
+        )
+
+    def get_order(self, order_id: str) -> dict:
+        """GET /portfolio/orders/{order_id}."""
+        return self.request(
+            "GET", f"/portfolio/orders/{order_id}", authenticated=True,
+        )
+
+    def get_fills(
+        self, *, ticker: str | None = None,
+        order_id: str | None = None, limit: int = 100,
+    ) -> dict:
+        """GET /portfolio/fills. Single-page; paginate separately if needed."""
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        if order_id:
+            params["order_id"] = order_id
+        return self.request("GET", "/portfolio/fills", params=params)
+
+    def get_positions(
+        self, *, ticker: str | None = None, limit: int = 100,
+    ) -> dict:
+        """GET /portfolio/positions."""
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        return self.request("GET", "/portfolio/positions", params=params)
+
+    def get_settlements(
+        self, *, ticker: str | None = None, limit: int = 100,
+    ) -> dict:
+        """GET /portfolio/settlements."""
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        return self.request("GET", "/portfolio/settlements", params=params)

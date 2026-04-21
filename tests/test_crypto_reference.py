@@ -172,6 +172,31 @@ def test_basket_source_snapshot_state_returns_latest_per_src():
     assert state["coinbase"].price == Decimal("60100")
 
 
+def test_basket_source_get_last_tick_us_returns_max_across_sources():
+    src = cr.BasketReferenceSource(assets=("btc",))
+    # Before any tick → None.
+    assert src.get_last_tick_us("btc") is None
+    src.record_tick(_tick("btc", 1_000_000, "60000", "coinbase"))
+    assert src.get_last_tick_us("btc") == 1_000_000
+    # A later tick from a different source wins.
+    src.record_tick(_tick("btc", 5_000_000, "60100", "kraken"))
+    assert src.get_last_tick_us("btc") == 5_000_000
+    # An earlier tick from coinbase does not rewind the max.
+    src.record_tick(_tick("btc", 3_000_000, "60050", "coinbase"))
+    assert src.get_last_tick_us("btc") == 5_000_000
+
+
+def test_basket_source_get_last_tick_us_unknown_asset_returns_none():
+    src = cr.BasketReferenceSource(assets=("btc",))
+    src.record_tick(_tick("btc", 1, "60000", "coinbase"))
+    assert src.get_last_tick_us("eth") is None
+
+
+def test_licensed_source_get_last_tick_us_is_none():
+    src = cr.LicensedCFBenchmarksSource(api_key="")
+    assert src.get_last_tick_us("btc") is None
+
+
 # --------- LicensedCFBenchmarksSource ---------
 
 def test_licensed_source_unlicensed_is_no_op():

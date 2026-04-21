@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Kalshi fair-value scanner — prod deploy stack.
+  ECR repo + Fargate task + Postgres RDS + Secrets Manager.
+  Starts in paper mode; live requires the three-opt-in gate at application layer.
+
+# NOTE: This is a scaffolding stub for P2-M4-T01. It is deployable but has
+# not been hardened (no WAF, no VPC-tight security groups by default, no
+# autoscaling). Treat as a starting point; review with a cloud reviewer
+# before first deploy.
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: paper
+    AllowedValues: [paper, live]
+    Description: paper = dry-run, live = requires three-opt-in gate
+  DockerImageTag:
+    Type: String
+    Default: latest
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+
+Resources:
+  ECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: kalshi-scanner
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "selection": {
+                "tagStatus": "untagged",
+                "countType": "sinceImagePushed",
+                "countUnit": "days",
+                "countNumber": 7
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:kalshi/*
+
+  TaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub kalshi-scanner-${EnvName}
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt TaskRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: scanner
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/kalshi-scanner:${DockerImageTag}
+          Command: ["python3.11", "src/run_kalshi_shadow.py",
+                    "--primary-strategy", "pure_lag",
+                    "--paper-executor",
+                    "--with-kraken",
+                    "--interval-s", "1.0"]
+          Environment:
+            - Name: KALSHI_CONFIG_PATH
+              Value: !Sub config/kalshi_fair_value_${EnvName}.json
+            - Name: DATABASE_URL
+              Value: !Sub
+                - "postgresql://{{resolve:secretsmanager:kalshi/${EnvName}/db-url:SecretString}}"
+                - EnvName: !Ref EnvName
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub /kalshi/scanner/${EnvName}
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: scanner
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDef
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref SubnetIds
+          AssignPublicIp: ENABLED
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /kalshi/scanner/${EnvName}
+      RetentionInDays: 30
+
+Outputs:
+  RepoUri:
+    Value: !GetAtt ECRRepo.RepositoryUri
+  TaskDefArn:
+    Value: !Ref TaskDef

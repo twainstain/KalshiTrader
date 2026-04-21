@@ -112,6 +112,127 @@ def test_tick_writes_one_decision_row(evaluator, db):
     assert row[2] is None  # not reconciled yet
 
 
+def test_tick_populates_latency_columns(db):
+    """P1-M5: both latency columns must fill on decision write."""
+    conn, _ = db
+    # Quote timestamped 12 ms before the decision clock.
+    quote_ts = 1_746_000_000_000_000 - 12_000
+    market = MagicMock()
+    market.get_quotes.return_value = [_mq(quote_timestamp_us=quote_ts)]
+    market.is_healthy.return_value = True
+    # Reference source that exposes get_last_tick_us (new protocol member).
+    reference = MagicMock()
+    reference.get_spot.return_value = Decimal("66000")
+    reference.get_60s_avg.return_value = Decimal("66000")
+    # Last reference tick was 8 ms before the decision clock.
+    reference.get_last_tick_us.return_value = 1_746_000_000_000_000 - 8_000
+
+    strategy = KalshiFairValueStrategy(
+        FairValueModel(no_data_haircut=Decimal("0")),
+        StrategyConfig(
+            min_edge_bps_after_fees=Decimal("50"),
+            max_ci_width=Decimal("0.50"),
+        ),
+    )
+    KalshiShadowEvaluator(
+        market_source=market,
+        reference_source=reference,
+        strategy=strategy,
+        asset_by_ticker={"KXBTC15M-T": "btc"},
+        conn=conn,
+        now_us=lambda: 1_746_000_000_000_000,
+    ).tick()
+
+    row = conn.execute(
+        "SELECT latency_ms_book_to_decision, latency_ms_ref_to_decision "
+        "FROM shadow_decisions"
+    ).fetchone()
+    assert row[0] is not None
+    assert row[1] is not None
+    assert abs(float(row[0]) - 12.0) < 0.01
+    assert abs(float(row[1]) - 8.0) < 0.01
+
+
+def test_tick_latency_ref_null_when_source_lacks_method(db):
+    """Back-compat: reference sources without get_last_tick_us keep the column NULL."""
+    conn, _ = db
+    market = MagicMock()
+    market.get_quotes.return_value = [_mq()]
+    market.is_healthy.return_value = True
+    # A reference source with no get_last_tick_us attribute at all.
+    class LegacyRef:
+        def get_spot(self, asset): return Decimal("66000")
+        def get_60s_avg(self, asset): return Decimal("66000")
+    strategy = KalshiFairValueStrategy(
+        FairValueModel(no_data_haircut=Decimal("0")),
+        StrategyConfig(
+            min_edge_bps_after_fees=Decimal("50"),
+            max_ci_width=Decimal("0.50"),
+        ),
+    )
+    KalshiShadowEvaluator(
+        market_source=market,
+        reference_source=LegacyRef(),
+        strategy=strategy,
+        asset_by_ticker={"KXBTC15M-T": "btc"},
+        conn=conn,
+        now_us=lambda: 1_746_000_000_000_000,
+    ).tick()
+    row = conn.execute(
+        "SELECT latency_ms_book_to_decision, latency_ms_ref_to_decision "
+        "FROM shadow_decisions"
+    ).fetchone()
+    assert row[0] is not None           # book latency always available
+    assert row[1] is None               # ref latency gracefully absent
+
+
+def test_tick_writes_default_strategy_label(evaluator, db):
+    """Regression: `strategy_label` defaults to 'stat_model' and persists."""
+    conn, _ = db
+    evaluator.tick()
+    row = conn.execute(
+        "SELECT strategy_label FROM shadow_decisions"
+    ).fetchone()
+    assert row[0] == "stat_model"
+
+
+def test_tick_writes_custom_strategy_label(db):
+    """Regression: side-by-side runs tag pure_lag decisions correctly."""
+    conn, _ = db
+    market = MagicMock()
+    market.get_quotes.return_value = [_mq()]
+    market.is_healthy.return_value = True
+    reference = MagicMock()
+    reference.get_spot.return_value = Decimal("66000")
+    reference.get_60s_avg.return_value = Decimal("66000")
+    strategy = KalshiFairValueStrategy(
+        FairValueModel(no_data_haircut=Decimal("0")),
+        StrategyConfig(
+            min_edge_bps_after_fees=Decimal("50"),
+            max_ci_width=Decimal("0.50"),
+        ),
+    )
+    ev = KalshiShadowEvaluator(
+        market_source=market, reference_source=reference,
+        strategy=strategy,
+        market_meta_by_ticker={
+            "KXBTC15M-T": {
+                "series_ticker": "KXBTC15M", "event_ticker": "E",
+                "strike": "65000", "comparator": "above",
+                "expiration_ts": 1_746_000_000, "asset": "btc",
+            },
+        },
+        asset_by_ticker={"KXBTC15M-T": "btc"},
+        conn=conn,
+        strategy_label="pure_lag",
+    )
+    ev.tick()
+    row = conn.execute(
+        "SELECT strategy_label FROM shadow_decisions"
+    ).fetchone()
+    assert row[0] == "pure_lag"
+
+
 def test_tick_skips_when_asset_not_mapped(db):
     conn, _ = db
     market = MagicMock()
@@ -453,6 +574,69 @@ def test_shadow_config_default_gates_reject_final_minute():
     assert hi <= 900, "window must not exceed 15 minutes"
     # Edge floor comes from the same doc.
     assert cfg.min_edge_bps_after_fees >= Decimal("300")
+
+
+def test_build_evaluator_primary_pure_lag_wires_correctly():
+    """Regression: --primary-strategy=pure_lag installs PureLagStrategy as
+    the main evaluator's strategy and tags decisions with 'pure_lag'."""
+    from run_kalshi_shadow import build_evaluator
+    from strategy.pure_lag import PureLagStrategy
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    # Minimal schema (only need columns the evaluator inserts).
+    conn.execute("""CREATE TABLE shadow_decisions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker TEXT, ts_us BIGINT,
+        p_yes TEXT, ci_width TEXT,
+        reference_price TEXT, reference_60s_avg TEXT, time_remaining_s TEXT,
+        best_yes_ask TEXT, best_no_ask TEXT,
+        book_depth_yes_usd TEXT, book_depth_no_usd TEXT,
+        recommended_side TEXT, hypothetical_fill_price TEXT,
+        hypothetical_size_contracts TEXT,
+        expected_edge_bps_after_fees TEXT, fee_bps_at_decision TEXT,
+        realized_outcome TEXT, realized_pnl_usd TEXT,
+        latency_ms_ref_to_decision TEXT, latency_ms_book_to_decision TEXT,
+        strategy_label TEXT
+    )""")
+    ev, coord = build_evaluator(
+        conn=conn, is_postgres=False,
+        rest_client=MagicMock(),
+        reference_fetcher=lambda a: None,
+        primary_strategy="pure_lag",
+    )
+    assert isinstance(ev._strategy, PureLagStrategy)
+    assert ev._strategy_label == "pure_lag"
+    # Coordinator feeds the lag strategy via sample_reference().
+    assert ev._strategy in getattr(coord, "_tick_sinks", [])
+
+
+def test_build_evaluator_primary_default_is_stat_model():
+    """Regression: unset --primary-strategy keeps stat_model wiring intact."""
+    from run_kalshi_shadow import build_evaluator
+    from strategy.kalshi_fair_value import KalshiFairValueStrategy
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE shadow_decisions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker TEXT, ts_us BIGINT,
+        p_yes TEXT, ci_width TEXT,
+        reference_price TEXT, reference_60s_avg TEXT, time_remaining_s TEXT,
+        best_yes_ask TEXT, best_no_ask TEXT,
+        book_depth_yes_usd TEXT, book_depth_no_usd TEXT,
+        recommended_side TEXT, hypothetical_fill_price TEXT,
+        hypothetical_size_contracts TEXT,
+        expected_edge_bps_after_fees TEXT, fee_bps_at_decision TEXT,
+        realized_outcome TEXT, realized_pnl_usd TEXT,
+        latency_ms_ref_to_decision TEXT, latency_ms_book_to_decision TEXT,
+        strategy_label TEXT
+    )""")
+    ev, _ = build_evaluator(
+        conn=conn, is_postgres=False,
+        rest_client=MagicMock(),
+        reference_fetcher=lambda a: None,
+    )
+    assert isinstance(ev._strategy, KalshiFairValueStrategy)
+    assert ev._strategy_label == "stat_model"
 
 
 def test_pnl_side_none_zero_even_on_win():

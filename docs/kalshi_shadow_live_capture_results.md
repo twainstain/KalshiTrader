@@ -193,5 +193,5 @@ PYTHONPATH=src nohup python3.11 -m run_kalshi_shadow \
 - `src/run_kalshi_shadow.py` — entrypoint
 - `src/execution/kalshi_shadow_evaluator.py` — engine
 - `src/strategy/kalshi_fair_value.py` — fair-value pricer
-- `src/kalshi_rest.py` — RSA-PSS + public REST client
+- `src/kalshi_api.py` — RSA-PSS + public REST client
 - Kalshi docs: [/markets](https://docs.kalshi.com/reference/get-markets), [/markets/{ticker}/orderbook](https://docs.kalshi.com/reference/getmarketorderbook)

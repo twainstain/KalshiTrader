@@ -1,0 +1,127 @@
+name: Deploy Arbitrage Trader
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "config/**"
+      - "tests/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+      - ".github/workflows/**"
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install web3 requests python-dotenv fastapi "uvicorn[standard]" psycopg2-binary pytest httpx
+
+      - name: Install trading_platform
+        run: |
+          git submodule update --init --recursive
+          pip install lib/trading_platform
+
+      - name: Run tests
+        run: PYTHONPATH=src pytest tests/ --ignore=lib/ -q
+
+  build-and-push:
+    name: Build & Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: arb-trader
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                     $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+  deploy:
+    name: Deploy to EC2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/arb-trader
+
+            # Pull latest code
+            git pull origin master --ff-only
+
+            # Try ECR pull, fall back to local build
+            if [ -n "${{ secrets.ECR_REGISTRY }}" ]; then
+              aws ecr get-login-password --region us-east-1 \
+                | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }} 2>/dev/null || true
+              export ECR_REGISTRY=${{ secrets.ECR_REGISTRY }}
+              docker compose pull bot 2>/dev/null || echo "ECR pull failed — building locally"
+            fi
+            docker compose build bot
+
+            # Rolling restart
+            docker compose up -d bot
+
+            # Health check — wait up to 60s (startup includes pool discovery)
+            CREDS=$(grep DASHBOARD_USER .env | cut -d= -f2):$(grep DASHBOARD_PASS .env | cut -d= -f2)
+            for i in $(seq 1 12); do
+              if curl -sf -u "$CREDS" http://localhost:8000/health > /dev/null 2>&1; then
+                echo "Health check passed"
+                exit 0
+              fi
+              echo "Waiting for health check... ($i/12)"
+              sleep 5
+            done
+
+            echo "Health check failed — rolling back"
+            docker compose down bot
+            docker compose up -d bot
+            exit 1

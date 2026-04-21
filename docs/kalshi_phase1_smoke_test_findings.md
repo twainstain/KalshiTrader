@@ -27,7 +27,7 @@ Storage: SQLite (`data/kalshi.db`) tables `kalshi_historical_markets` and `refer
 
 Scripts used:
 
-- `scripts/kalshi_historical_pull.py` — authenticated, paginated `/historical/markets` walker (`src/kalshi_rest.KalshiRestClient`). RSA-PSS signed. Normalizes `greater_or_equal` → `at_least`, derives `series_ticker` from ticker prefix.
+- `scripts/kalshi_historical_pull.py` — authenticated, paginated `/historical/markets` walker (`src/kalshi_api.KalshiAPIClient`). RSA-PSS signed. Normalizes `greater_or_equal` → `at_least`, derives `series_ticker` from ticker prefix.
 - `scripts/coinbase_historical_pull.py` — unauthenticated `/candles?granularity=60` backfill. 300-candle cursor-style pagination with `cursor_end = min_ts - 1` stepping backwards.
 
 Total wall-clock for data pulls: ~55 seconds (17s Kalshi + 55s Coinbase across the 30-day range).
@@ -130,7 +130,7 @@ Deep-OTM/deep-ITM buckets (500+ bps from strike) show **55-57% agreement** acros
 
 Summarized here for audit; per-task status is in the implementation tracker.
 
-- `src/kalshi_rest.py` — direct-requests + RSA-PSS client that sidesteps `kalshi_python_sync` 3.2.0 pydantic bugs on `/historical/*`. Signs `{ts_ms}{METHOD}{path_without_query}` per Kalshi docs §3.2.
+- `src/kalshi_api.py` — direct-requests + RSA-PSS client that sidesteps `kalshi_python_sync` 3.2.0 pydantic bugs on `/historical/*`. Signs `{ts_ms}{METHOD}{path_without_query}` per Kalshi docs §3.2.
 - `src/market/kalshi_market.py:make_client()` — works around two bugs in `kalshi_python_sync.ApiClient.set_kalshi_auth` (missing `KalshiAuth` import + path-vs-content confusion). Reads PEM bytes and assigns `client.kalshi_auth` directly.
 - `scripts/kalshi_historical_pull.py` — adds `_to_epoch_s()` ISO-8601 parser, `_derive_series_ticker()` prefix-extraction, `COMPARATOR_MAP` for `greater_or_equal → at_least`.
 - `scripts/coinbase_historical_pull.py` — 1-minute candle paginator with `cursor_end = oldest_ts − 1` stepping (earlier bug: `len(data) < 300` as an exit condition caused premature termination).
@@ -157,7 +157,7 @@ tests/test_crypto_reference.py      19
 tests/test_fair_value_model.py      17
 tests/test_kalshi_strategy.py       12
 tests/test_run_kalshi_backtest.py   10
-tests/test_kalshi_rest.py           18
+tests/test_kalshi_api.py           18
 tests/test_kalshi_historical_pull.py 9
 tests/test_kalshi_track_reference.py 9
 ```

@@ -121,6 +121,234 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_sd_ticker ON shadow_decisions (market_ticker)",
     "CREATE INDEX IF NOT EXISTS idx_sd_ts ON shadow_decisions (ts_us)",
     "CREATE INDEX IF NOT EXISTS idx_sd_outcome ON shadow_decisions (realized_outcome)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_ideas_profiles (
+        profile_slug      TEXT PRIMARY KEY,
+        username          TEXT NOT NULL DEFAULT '',
+        display_name      TEXT NOT NULL DEFAULT '',
+        social_id         TEXT NOT NULL DEFAULT '',
+        bio               TEXT NOT NULL DEFAULT '',
+        profile_image_url TEXT NOT NULL DEFAULT '',
+        profile_image_path TEXT NOT NULL DEFAULT '',
+        pending_profile_image_path TEXT NOT NULL DEFAULT '',
+        total_trades      TEXT NOT NULL DEFAULT '',
+        total_predictions TEXT NOT NULL DEFAULT '',
+        correct_predictions TEXT NOT NULL DEFAULT '',
+        win_rate          TEXT NOT NULL DEFAULT '',
+        profit_usd        TEXT NOT NULL DEFAULT '',
+        follower_count    BIGINT NOT NULL DEFAULT 0,
+        following_count   BIGINT NOT NULL DEFAULT 0,
+        posts_count       BIGINT NOT NULL DEFAULT 0,
+        profile_view_count BIGINT NOT NULL DEFAULT 0,
+        joined_at         TEXT NOT NULL DEFAULT '',
+        top_categories_json TEXT NOT NULL DEFAULT '[]',
+        blocked           INTEGER NOT NULL DEFAULT 0,
+        inner_circle_enabled INTEGER NOT NULL DEFAULT 0,
+        inner_circle_viewer_status TEXT NOT NULL DEFAULT '',
+        metrics_volume    BIGINT NOT NULL DEFAULT 0,
+        metrics_volume_fp TEXT NOT NULL DEFAULT '',
+        metrics_pnl       BIGINT NOT NULL DEFAULT 0,
+        metrics_num_markets_traded BIGINT NOT NULL DEFAULT 0,
+        metrics_raw_json  TEXT NOT NULL DEFAULT '',
+        raw_json          TEXT NOT NULL,
+        fetched_at_us     BIGINT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kip_social_id ON kalshi_ideas_profiles (social_id)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_ideas_leaderboard_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category            TEXT NOT NULL,
+        time_period         TEXT NOT NULL DEFAULT '',
+        rank                INTEGER NOT NULL,
+        profile_slug        TEXT NOT NULL,
+        username            TEXT NOT NULL DEFAULT '',
+        display_name        TEXT NOT NULL DEFAULT '',
+        social_id           TEXT NOT NULL DEFAULT '',
+        profile_image_path  TEXT NOT NULL DEFAULT '',
+        metric_value        TEXT NOT NULL DEFAULT '',
+        profit_usd          TEXT NOT NULL DEFAULT '',
+        winning_streak      TEXT NOT NULL DEFAULT '',
+        total_predictions   TEXT NOT NULL DEFAULT '',
+        correct_predictions TEXT NOT NULL DEFAULT '',
+        is_anonymous        INTEGER NOT NULL DEFAULT 0,
+        raw_json            TEXT NOT NULL,
+        fetched_at_us       BIGINT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kile_category_rank ON kalshi_ideas_leaderboard_entries (category, rank)",
+    "CREATE INDEX IF NOT EXISTS idx_kile_slug ON kalshi_ideas_leaderboard_entries (profile_slug)",
+    "CREATE INDEX IF NOT EXISTS idx_kile_fetched_at ON kalshi_ideas_leaderboard_entries (fetched_at_us)",
+    "CREATE INDEX IF NOT EXISTS idx_kile_period_category_rank ON kalshi_ideas_leaderboard_entries (time_period, category, rank)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_ideas_trades (
+        trade_id         TEXT PRIMARY KEY,
+        profile_slug     TEXT NOT NULL,
+        social_id        TEXT NOT NULL DEFAULT '',
+        market_id        TEXT NOT NULL DEFAULT '',
+        ticker           TEXT NOT NULL DEFAULT '',
+        price_dollars    TEXT NOT NULL DEFAULT '',
+        count_fp         TEXT NOT NULL DEFAULT '',
+        taker_side       TEXT NOT NULL DEFAULT '',
+        maker_action     TEXT NOT NULL DEFAULT '',
+        taker_action     TEXT NOT NULL DEFAULT '',
+        maker_nickname   TEXT NOT NULL DEFAULT '',
+        taker_nickname   TEXT NOT NULL DEFAULT '',
+        maker_social_id  TEXT NOT NULL DEFAULT '',
+        taker_social_id  TEXT NOT NULL DEFAULT '',
+        related_role     TEXT NOT NULL DEFAULT '',
+        created_ts_us    BIGINT NOT NULL,
+        raw_json         TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kit_slug_ts ON kalshi_ideas_trades (profile_slug, created_ts_us)",
+    "CREATE INDEX IF NOT EXISTS idx_kit_ticker_ts ON kalshi_ideas_trades (ticker, created_ts_us)",
+
+    # P2-M1: paper-mode executor persistence. Every submit/reconcile writes
+    # a row so notebooks can compute realized paper edge per strategy /
+    # per asset / per time-bucket without replaying from shadow_decisions.
+    """
+    CREATE TABLE IF NOT EXISTS paper_fills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_ticker TEXT NOT NULL,
+        strategy_label TEXT NOT NULL DEFAULT '',
+        filled_at_us BIGINT NOT NULL,
+        side TEXT NOT NULL,
+        fill_price TEXT NOT NULL,
+        size_contracts TEXT NOT NULL,
+        fees_paid_usd TEXT NOT NULL,
+        notional_usd TEXT NOT NULL,
+        expected_edge_bps_after_fees TEXT NOT NULL,
+        p_yes TEXT NOT NULL,
+        ci_width TEXT NOT NULL,
+        reference_price TEXT NOT NULL,
+        reference_60s_avg TEXT NOT NULL,
+        time_remaining_s TEXT NOT NULL,
+        strike TEXT NOT NULL,
+        comparator TEXT NOT NULL,
+        fee_bps_at_decision TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pf_ticker ON paper_fills (market_ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_pf_strategy ON paper_fills (strategy_label)",
+    "CREATE INDEX IF NOT EXISTS idx_pf_filled_at ON paper_fills (filled_at_us)",
+
+    """
+    CREATE TABLE IF NOT EXISTS paper_settlements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fill_id BIGINT NOT NULL,
+        market_ticker TEXT NOT NULL,
+        settled_at_us BIGINT NOT NULL,
+        outcome TEXT NOT NULL,
+        realized_pnl_usd TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ps_ticker ON paper_settlements (market_ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_ps_fill_id ON paper_settlements (fill_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ps_settled_at ON paper_settlements (settled_at_us)",
+
+    # P2-M2: live executor persistence. Each submit/poll/cancel/settle
+    # writes a row so reconciliation notebooks can confirm realized-P/L
+    # matches Kalshi's /portfolio/settlements. Discrepancies surface here
+    # rather than being buried in logs.
+    """
+    CREATE TABLE IF NOT EXISTS live_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id TEXT NOT NULL DEFAULT '',
+        client_order_id TEXT NOT NULL,
+        market_ticker TEXT NOT NULL,
+        strategy_label TEXT NOT NULL DEFAULT '',
+        submitted_at_us BIGINT NOT NULL,
+        side TEXT NOT NULL,
+        price TEXT NOT NULL,
+        size_contracts INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        filled_at_us BIGINT,
+        fill_price TEXT,
+        fill_quantity INTEGER,
+        fees_paid_usd TEXT,
+        canceled_at_us BIGINT,
+        cancel_reason TEXT,
+        expected_edge_bps_after_fees TEXT NOT NULL DEFAULT '',
+        p_yes TEXT NOT NULL DEFAULT '',
+        reference_price TEXT NOT NULL DEFAULT '',
+        strike TEXT NOT NULL DEFAULT '',
+        comparator TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uidx_lo_client_id ON live_orders (client_order_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lo_ticker ON live_orders (market_ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_lo_status ON live_orders (status)",
+    "CREATE INDEX IF NOT EXISTS idx_lo_submitted_at ON live_orders (submitted_at_us)",
+
+    """
+    CREATE TABLE IF NOT EXISTS live_settlements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_row_id BIGINT NOT NULL,
+        market_ticker TEXT NOT NULL,
+        settled_at_us BIGINT NOT NULL,
+        outcome TEXT NOT NULL,
+        computed_pnl_usd TEXT NOT NULL,
+        kalshi_reported_pnl_usd TEXT,
+        discrepancy_usd TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ls_ticker ON live_settlements (market_ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_ls_order_row_id ON live_settlements (order_row_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ls_settled_at ON live_settlements (settled_at_us)",
+
+    # Ops-events: structured error / warning / notable-info capture that
+    # the dashboard's /kalshi/ops tails. Cheap enough that any emit site
+    # in the process can write without async overhead (short-lived conn,
+    # WAL-safe). Level is a free-form string but dashboard filtering
+    # assumes 'info' / 'warn' / 'error'.
+    """
+    CREATE TABLE IF NOT EXISTS ops_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_us       BIGINT NOT NULL,
+        source      TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        message     TEXT NOT NULL,
+        extras_json TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ops_ts ON ops_events (ts_us)",
+    "CREATE INDEX IF NOT EXISTS idx_ops_level_ts ON ops_events (level, ts_us)",
+
+    # Minute-bucketed phase_timing rollups. Raw phase_timing events stay
+    # in `logs/events_YYYY-MM-DD.jsonl` (one line per phase exit). A
+    # background writer (scripts/rollup_phase_timings.py) re-aggregates
+    # the trailing 2h of JSONL every minute and upserts into this table.
+    # Dashboard queries here instead of scanning JSONL — window-aware
+    # and cross-day cheap.
+    #
+    # `bucket_seconds` is carried explicitly so we can later add hourly
+    # or daily rollups alongside the minute-resolution default without
+    # re-migrating. UNIQUE(bucket_ts_us, bucket_seconds, phase) makes the
+    # upsert safe.
+    """
+    CREATE TABLE IF NOT EXISTS phase_timing_rollup (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket_ts_us     BIGINT  NOT NULL,
+        bucket_seconds   INTEGER NOT NULL,
+        phase            TEXT    NOT NULL,
+        count            INTEGER NOT NULL,
+        errors           INTEGER NOT NULL DEFAULT 0,
+        total_elapsed_ms REAL    NOT NULL DEFAULT 0,
+        p50_ms           REAL,
+        p95_ms           REAL,
+        p99_ms           REAL,
+        max_ms           REAL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uidx_ptr_bucket_phase "
+    "ON phase_timing_rollup (bucket_ts_us, bucket_seconds, phase)",
+    "CREATE INDEX IF NOT EXISTS idx_ptr_bucket ON phase_timing_rollup (bucket_ts_us)",
+    "CREATE INDEX IF NOT EXISTS idx_ptr_phase_bucket "
+    "ON phase_timing_rollup (phase, bucket_ts_us)",
 )
 
 
@@ -130,6 +358,15 @@ ALL_TABLES: tuple[str, ...] = (
     "kalshi_live_book_snapshots",
     "reference_ticks",
     "shadow_decisions",
+    "kalshi_ideas_profiles",
+    "kalshi_ideas_leaderboard_entries",
+    "kalshi_ideas_trades",
+    "paper_fills",
+    "paper_settlements",
+    "live_orders",
+    "live_settlements",
+    "ops_events",
+    "phase_timing_rollup",
 )
 
 
@@ -161,6 +398,26 @@ SAFE_ALTER_STATEMENTS: tuple[str, ...] = (
     "ALTER TABLE kalshi_historical_markets ADD COLUMN settlement_ts BIGINT",
     "ALTER TABLE kalshi_historical_markets ADD COLUMN expiration_value TEXT",
     "ALTER TABLE kalshi_historical_markets ADD COLUMN last_price TEXT",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN profile_image_path TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN pending_profile_image_path TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN follower_count BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN following_count BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN posts_count BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN profile_view_count BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN joined_at TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN top_categories_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN inner_circle_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN inner_circle_viewer_status TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN metrics_volume BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN metrics_volume_fp TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN metrics_pnl BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN metrics_num_markets_traded BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE kalshi_ideas_profiles ADD COLUMN metrics_raw_json TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_leaderboard_entries ADD COLUMN time_period TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_leaderboard_entries ADD COLUMN profile_image_path TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_leaderboard_entries ADD COLUMN metric_value TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE kalshi_ideas_leaderboard_entries ADD COLUMN is_anonymous INTEGER NOT NULL DEFAULT 0",
     """CREATE TABLE IF NOT EXISTS coinbase_trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asset TEXT NOT NULL,
@@ -172,6 +429,10 @@ SAFE_ALTER_STATEMENTS: tuple[str, ...] = (
     )""",
     "CREATE INDEX IF NOT EXISTS idx_cb_trades_asset_ts ON coinbase_trades (asset, ts_us)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uidx_cb_trades_id ON coinbase_trades (asset, trade_id)",
+    # 2026-04-20: per-strategy decision tagging for side-by-side comparison
+    # (e.g., stat_model vs pure_lag runs sharing the shadow_decisions table).
+    "ALTER TABLE shadow_decisions ADD COLUMN strategy_label TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_sd_strategy_label ON shadow_decisions (strategy_label)",
 )
 
 

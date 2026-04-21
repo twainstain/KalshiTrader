@@ -265,6 +265,20 @@ class BasketReferenceSource:
         # window. P2 should match CF's true weighted methodology.
         return rolling_average(ticks, window_end_us=now_us, window_seconds=60)
 
+    def get_last_tick_us(self, asset: str) -> int | None:
+        """Microsecond timestamp of the most recent tick across all sources.
+
+        Returns the max `ts_us` across any venue's latest tick. `None` if
+        no tick has landed yet — callers use that to record a stale feed
+        or skip the ref-latency metric for this decision.
+        """
+        asset = asset.lower()
+        with self._lock:
+            st = self._state.get(asset)
+            if not st or not st.latest_by_src:
+                return None
+            return max(t.ts_us for t in st.latest_by_src.values())
+
     # ---- test seams ----
 
     def snapshot_state(self, asset: str) -> dict[str, ReferenceTick]:
@@ -311,4 +325,7 @@ class LicensedCFBenchmarksSource:
         return None
 
     def get_60s_avg(self, asset: str) -> Decimal | None:
+        return None
+
+    def get_last_tick_us(self, asset: str) -> int | None:
         return None

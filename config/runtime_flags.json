@@ -1,0 +1,29 @@
+{
+  "execution_enabled": {
+    "bnb": true,
+    "btc": true,
+    "doge": true,
+    "eth": true,
+    "hype": true,
+    "sol": true,
+    "xrp": true
+  },
+  "execution_kill_switch": false,
+  "scan_enabled": {
+    "bnb": true,
+    "btc": true,
+    "doge": true,
+    "eth": true,
+    "hype": true,
+    "sol": true,
+    "xrp": true
+  },
+  "strategy_enabled": {
+    "partial_avg": false,
+    "pure_lag": true,
+    "stat_model": false
+  },
+  "updated_at_us": 1776742907864934,
+  "updated_by": "api",
+  "version": 1
+}
