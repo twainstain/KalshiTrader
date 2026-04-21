@@ -117,10 +117,11 @@ class TestTimeWindowRule:
         assert TimeWindowRule().check(opp, _ctx()).approved
 
     def test_rejects_too_early(self) -> None:
-        opp = _opp(quote=_mq(time_remaining_s=Decimal("120")))
+        """t_remaining_s=500 is outside [5, 300] → rejected."""
+        opp = _opp(quote=_mq(time_remaining_s=Decimal("500")))
         v = TimeWindowRule().check(opp, _ctx())
         assert not v.approved
-        assert "120" in v.reason
+        assert "500" in v.reason
 
     def test_rejects_too_late(self) -> None:
         # Within the final 5s: no longer enough time for cancel-on-timeout.
@@ -128,7 +129,7 @@ class TestTimeWindowRule:
         assert not TimeWindowRule().check(opp, _ctx()).approved
 
     def test_boundaries_are_inclusive(self) -> None:
-        for tr in (Decimal("5"), Decimal("60")):
+        for tr in (Decimal("5"), Decimal("300")):
             opp = _opp(quote=_mq(time_remaining_s=tr))
             assert TimeWindowRule().check(opp, _ctx()).approved
 

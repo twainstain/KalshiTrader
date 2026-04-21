@@ -36,12 +36,15 @@ class PureLagConfig:
         threshold fired only ~5×/hour at 1 s sample rate.
       - `rolling_window_us`: shrunk 10 s → 5 s so moves are detected against
         a tighter baseline (less smoothing).
-      - `time_window_seconds`: tightened (30, 900) → (5, 60) to match
-        `risk.kalshi_rules.TimeWindowRule([5, 60])`. With the risk layer
-        live, decisions outside [5, 60] were always `risk_reject`'d before
-        becoming paper fills — emitting them upstream was just noise in
-        `shadow_decisions`. The final-minute window is where the structural
-        partial-obs edge actually lives per the feasibility report.
+      - `time_window_seconds`: (5, 60) was too narrow — Kalshi opens one
+        market per asset at a time and they all close synchronously, so
+        `(5, 60)` gave only 220 eligible seconds/hour across ALL assets
+        (a 55 s burst × 4 cycles). Widened 2026-04-21 to **(5, 300)** so
+        the scanner has continuous coverage: 5 min × 4 cycles = 20 min of
+        in-window sampling per 15-min cycle, across 7 assets = ~140 asset-
+        minutes per hour of candidates. Still covers the final-minute
+        partial-obs edge zone (per feasibility report §3.3). Paired with
+        `RiskEngine.TimeWindowRule([5, 300])`.
       - `min_fill_price`: new floor, rejects lottery-ticket yes/no asks
         below $0.10 that the stat_model used to bleed on.
     """
@@ -52,7 +55,7 @@ class PureLagConfig:
     # Minimum edge after fees (after implicit 35 bps fee model).
     min_edge_bps_after_fees: Decimal = Decimal("100")
     min_book_depth_usd: Decimal = Decimal("50")
-    time_window_seconds: tuple[int, int] = (5, 60)
+    time_window_seconds: tuple[int, int] = (5, 300)
     hypothetical_size_contracts: Decimal = Decimal("10")
     # Reject fills below this price — prevents accumulating tiny long-tail
     # bets on low-flow assets (XRP/DOG/ETH lottery tickets).

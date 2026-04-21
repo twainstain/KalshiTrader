@@ -98,13 +98,15 @@ class MinEdgeAfterFeesRule:
 class TimeWindowRule:
     """P2-M1-T03. Reject unless `time_remaining_s in [min_s, max_s]`.
 
-    Defaults [5, 60]: the structural near-expiry edge window where the
-    partial-obs fair-value has the most signal and the MM repricing has
-    the least time to react. Closed interval on both sides — markets
-    expiring in < 5 s are too close to allow cancel-on-timeout to land.
+    Defaults [5, 300] (widened 2026-04-21 from [5, 60]): Kalshi opens one
+    market per asset at a time and they all close synchronously, so the
+    narrower [5, 60] gave only 220 eligible seconds/hour. At [5, 300] the
+    scanner has continuous coverage (5 min × 4 cycles = 20 min/hr per
+    asset). Lower bound of 5 s is kept — markets expiring in < 5 s don't
+    leave enough time for cancel-on-timeout to land.
     """
     min_s: Decimal = D("5")
-    max_s: Decimal = D("60")
+    max_s: Decimal = D("300")
     name: str = "time_window"
 
     def check(self, opp: Opportunity, ctx: RiskContext) -> RuleVerdict:

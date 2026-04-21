@@ -207,6 +207,55 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_kit_slug_ts ON kalshi_ideas_trades (profile_slug, created_ts_us)",
     "CREATE INDEX IF NOT EXISTS idx_kit_ticker_ts ON kalshi_ideas_trades (ticker, created_ts_us)",
 
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_series (
+        series_ticker TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        title TEXT,
+        frequency TEXT,
+        contract_terms_url TEXT,
+        raw_json TEXT NOT NULL,
+        fetched_ts BIGINT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ks_category ON kalshi_series(category)",
+    "CREATE INDEX IF NOT EXISTS idx_ks_fetched_ts ON kalshi_series(fetched_ts)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_contract_terms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pdf_url TEXT UNIQUE NOT NULL,
+        series_ticker_guess TEXT,
+        local_path TEXT,
+        bytes INTEGER,
+        sha256 TEXT,
+        fetched_ts BIGINT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kct_guess ON kalshi_contract_terms(series_ticker_guess)",
+    "CREATE INDEX IF NOT EXISTS idx_kct_fetched_ts ON kalshi_contract_terms(fetched_ts)",
+
+    """
+    CREATE TABLE IF NOT EXISTS kalshi_lag_candidates (
+        series_ticker TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        source_type TEXT NOT NULL DEFAULT 'unknown',
+        source_agency TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        publish_schedule_utc TEXT NOT NULL DEFAULT '',
+        ltt_to_expiry_s INTEGER NOT NULL DEFAULT 0,
+        strategy_hypothesis TEXT NOT NULL DEFAULT '',
+        lag_priority_score INTEGER NOT NULL DEFAULT 0,
+        priority_band TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        raw_json TEXT NOT NULL DEFAULT '',
+        built_ts BIGINT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_klc_score ON kalshi_lag_candidates(lag_priority_score DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_klc_category_score ON kalshi_lag_candidates(category, lag_priority_score DESC)",
+
     # P2-M1: paper-mode executor persistence. Every submit/reconcile writes
     # a row so notebooks can compute realized paper edge per strategy /
     # per asset / per time-bucket without replaying from shadow_decisions.
@@ -361,6 +410,9 @@ ALL_TABLES: tuple[str, ...] = (
     "kalshi_ideas_profiles",
     "kalshi_ideas_leaderboard_entries",
     "kalshi_ideas_trades",
+    "kalshi_series",
+    "kalshi_contract_terms",
+    "kalshi_lag_candidates",
     "paper_fills",
     "paper_settlements",
     "live_orders",

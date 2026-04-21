@@ -104,12 +104,46 @@ COMPARATOR_MAP = {
 # Injectable for tests via `LiveDataCoordinator.build(...)`.
 # ---------------------------------------------------------------------------
 
+from dataclasses import dataclass as _dataclass  # noqa: E402
+
+
+@_dataclass(frozen=True)
+class SnapshotTier:
+    """One tier of the time-remaining → fetch-cadence policy.
+
+    The coordinator picks the first tier whose `max_time_remaining_s`
+    covers a ticker's `time_remaining_s`, then refuses to re-fetch that
+    ticker until `interval_s` seconds have elapsed since its last fetch.
+
+    Example: `SnapshotTier(max_time_remaining_s=30, interval_s=1.0)`
+    fetches every market in the last 30 seconds on every scanner tick.
+    """
+    max_time_remaining_s: int
+    interval_s: float
+
+
+# Default cadence: the last 30 seconds of every 15-min cycle gets
+# per-tick freshness (~1 Hz); anything further out refreshes every 10 s.
+# That cuts the per-tick HTTP fan-out by ~10× during the 14-minute
+# cold stretch in every 15-min cycle without losing edge-relevant data.
+DEFAULT_SNAPSHOT_TIERS: tuple[SnapshotTier, ...] = (
+    SnapshotTier(max_time_remaining_s=30,           interval_s=1.0),
+    SnapshotTier(max_time_remaining_s=10**9,        interval_s=10.0),
+)
+
+
 class LiveDataCoordinator:
     """Per-tick side-effect bundle: discover markets, snapshot books, poll ref.
 
     Separated from `KalshiShadowEvaluator` so the evaluator stays a pure
     quotes-in / decisions-out engine. The coordinator is the part that
     touches the network.
+
+    **Tiered snapshot cadence:** `_snapshot_books_impl` only fetches
+    tickers whose previous fetch is older than the tier interval
+    applicable to their current `time_remaining_s`. Default tiers keep
+    near-expiry (≤30 s) markets on 1 Hz cadence and everything else on
+    10 s cadence. Pass `snapshot_tiers=...` to override.
     """
 
     def __init__(
@@ -122,6 +156,8 @@ class LiveDataCoordinator:
         market_limit_per_series: int = 50,
         event_logger: Any = None,
         flags_poller: Any = None,
+        snapshot_max_workers: int = 10,
+        snapshot_tiers: tuple[SnapshotTier, ...] = DEFAULT_SNAPSHOT_TIERS,
     ) -> None:
         self._rest = rest_client
         self._fetch_reference = reference_fetcher
@@ -134,6 +170,21 @@ class LiveDataCoordinator:
         self._event_logger = event_logger
         # Optional runtime-flags poller; when absent every asset is scanned.
         self._flags_poller = flags_poller
+        # Concurrency cap on parallel orderbook fetches. Bounded under
+        # Kalshi's Basic-tier 20 r/s read limit — with 10 workers + a
+        # handful of /markets discover calls per tick, peak rate ~12 r/s.
+        # Lazy-init the pool so tests that only exercise discover() don't
+        # pay the thread-start cost.
+        self._snapshot_max_workers = max(1, int(snapshot_max_workers))
+        self._snapshot_pool: Any = None
+        # Tiered cadence state. Tiers are sorted ascending by
+        # max_time_remaining_s so the first match wins.
+        self._snapshot_tiers: tuple[SnapshotTier, ...] = tuple(
+            sorted(snapshot_tiers, key=lambda t: t.max_time_remaining_s)
+        )
+        # Last fetch us per ticker. Tickers that were never fetched are
+        # absent — `_is_due` treats absent as "due now".
+        self._last_fetched_us: dict[str, int] = {}
 
     def discover(self) -> None:
         """Refresh the active-markets catalog. Called less often than per-tick."""
@@ -212,31 +263,110 @@ class LiveDataCoordinator:
             return self._snapshot_books_impl()
 
     def _snapshot_books_impl(self) -> None:
-        for ticker in list(self._market_meta.keys()):
-            try:
-                resp = self._rest.request(
-                    "GET", f"/markets/{ticker}/orderbook",
-                    authenticated=False,
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("book fetch %s failed: %s", ticker, e)
-                continue
-            # Kalshi's response uses `orderbook_fp` with `yes_dollars` /
-            # `no_dollars` keys (fixed-point dollar-string format). Translate
-            # into the `{yes: [...], no: [...]}` shape that our
-            # `KalshiMarketSource.apply_snapshot` expects.
-            raw = (resp or {}).get("orderbook_fp") or (resp or {}).get("orderbook") or {}
-            book = {
-                "yes": raw.get("yes_dollars") or raw.get("yes") or [],
-                "no":  raw.get("no_dollars")  or raw.get("no")  or [],
-            }
-            self._market_source.apply_snapshot(ticker, book)
-            status = (self._market_meta[ticker].get("status") or "active")
-            exp = int(self._market_meta[ticker].get("expiration_ts") or 0)
-            time_remaining = max(0, exp - int(time.time()))
-            self._market_source.update_lifecycle(
-                ticker, status=status, time_remaining_s=time_remaining,
+        """Parallel, tier-filtered orderbook fetch.
+
+        Only tickers "due" per their tier's `interval_s` are submitted
+        this tick — a market at `t_rem=500 s` (cold tier: 10 s interval)
+        gets re-fetched at most once per 10 s even though the scanner
+        ticks every 1 s.
+
+        Each due ticker's HTTP round-trip runs in its own worker thread.
+        Per-ticker errors are swallowed + logged so one bad ticker doesn't
+        stall the tick. `apply_snapshot` / `update_lifecycle` are already
+        guarded by `_books_lock` so concurrent writes are safe.
+        """
+        all_tickers = list(self._market_meta.keys())
+        if not all_tickers:
+            return
+        now_s = int(time.time())
+        now_us = now_s * 1_000_000
+        due = [t for t in all_tickers if self._is_due(t, now_s, now_us)]
+        if not due:
+            return
+        pool = self._ensure_snapshot_pool()
+        # `map` blocks on the first N submissions until workers are free,
+        # which naturally throttles against Kalshi's read-rate limit.
+        list(pool.map(self._fetch_and_apply_one, due))
+
+    def _is_due(self, ticker: str, now_s: int, now_us: int) -> bool:
+        """True iff this ticker's last fetch is older than its tier interval.
+
+        Tickers never fetched (`_last_fetched_us` miss) are always due.
+        The tier chosen is the first whose `max_time_remaining_s` covers
+        the ticker's current `time_remaining`.
+        """
+        meta = self._market_meta.get(ticker)
+        if meta is None:
+            return False
+        last_us = self._last_fetched_us.get(ticker)
+        if last_us is None:
+            return True
+        exp_ts = int(meta.get("expiration_ts") or 0)
+        t_rem = max(0, exp_ts - now_s)
+        interval_s = self._tier_interval_for(t_rem)
+        return (now_us - last_us) >= int(interval_s * 1_000_000)
+
+    def _tier_interval_for(self, time_remaining_s: int) -> float:
+        """Find the tier covering `time_remaining_s`. Falls back to 1 s if
+        no tier matches (defensive — DEFAULT_SNAPSHOT_TIERS always has a
+        catch-all)."""
+        for tier in self._snapshot_tiers:
+            if time_remaining_s <= tier.max_time_remaining_s:
+                return tier.interval_s
+        return 1.0
+
+    def _ensure_snapshot_pool(self) -> Any:
+        if self._snapshot_pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._snapshot_pool = ThreadPoolExecutor(
+                max_workers=self._snapshot_max_workers,
+                thread_name_prefix="kalshi-book-fetch",
             )
+        return self._snapshot_pool
+
+    def close(self) -> None:
+        """Shut the thread pool down. Safe to call multiple times."""
+        if self._snapshot_pool is not None:
+            self._snapshot_pool.shutdown(wait=False, cancel_futures=True)
+            self._snapshot_pool = None
+
+    def _fetch_and_apply_one(self, ticker: str) -> None:
+        """Fetch one orderbook + update lifecycle. Runs in a worker thread.
+
+        Records `last_fetched_us` on success so tier throttling works.
+        Failures don't bump the timer — a transient error means we'll retry
+        on the next tick regardless of tier.
+        """
+        try:
+            resp = self._rest.request(
+                "GET", f"/markets/{ticker}/orderbook",
+                authenticated=False,
+            )
+        except Exception as e:  # noqa: BLE001 — per-ticker isolation
+            logger.warning("book fetch %s failed: %s", ticker, e)
+            return
+        # Kalshi's response uses `orderbook_fp` with `yes_dollars` /
+        # `no_dollars` keys (fixed-point dollar-string format). Translate
+        # into the `{yes: [...], no: [...]}` shape that our
+        # `KalshiMarketSource.apply_snapshot` expects.
+        raw = (resp or {}).get("orderbook_fp") or (resp or {}).get("orderbook") or {}
+        book = {
+            "yes": raw.get("yes_dollars") or raw.get("yes") or [],
+            "no":  raw.get("no_dollars")  or raw.get("no")  or [],
+        }
+        self._market_source.apply_snapshot(ticker, book)
+        meta = self._market_meta.get(ticker, {})
+        status = meta.get("status") or "active"
+        exp = int(meta.get("expiration_ts") or 0)
+        time_remaining = max(0, exp - int(time.time()))
+        self._market_source.update_lifecycle(
+            ticker, status=status, time_remaining_s=time_remaining,
+        )
+        # Record successful fetch for tier throttling. Using
+        # `int(time.time()*1e6)` rather than re-using the tick's now_us
+        # is fine — workers may finish out of order and the resulting
+        # skew is well under the smallest tier interval (1 s).
+        self._last_fetched_us[ticker] = int(time.time() * 1_000_000)
 
     def sample_reference(self) -> None:
         """Poll Coinbase once per asset and feed the basket source.
@@ -871,6 +1001,10 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         raise
     finally:
+        try:
+            coordinator.close()
+        except Exception:  # noqa: BLE001 — shutdown hygiene; keep draining
+            pass
         for _, ws in ws_sources:
             try:
                 ws.stop(timeout=5.0)

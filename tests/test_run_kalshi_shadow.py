@@ -474,3 +474,148 @@ def test_run_loop_calls_coordinator_per_tick():
     assert coord.snapshot_books.call_count == 3
     assert coord.sample_reference.call_count == 3
     assert totals["written"] == 3
+
+
+# ----------------------------------------------------------------------
+# LiveDataCoordinator.snapshot_books — parallel fetch (2026-04-21)
+# ----------------------------------------------------------------------
+
+def _dispatching_rest_slow(market_payload, per_ticker_books, delay_s=0.05):
+    """REST mock that sleeps per orderbook call — lets us measure parallel
+    speedup by comparing wall-clock to (N × delay_s)."""
+    import time as _t
+    rest = MagicMock()
+
+    def _fake(method, path, **kwargs):
+        if path == "/markets":
+            series = kwargs["params"]["series_ticker"]
+            return {"markets": [{**market_payload,
+                                 "ticker": f"{series}-26APR201500-00"}]}
+        if "/orderbook" in path:
+            _t.sleep(delay_s)  # simulate network latency
+            ticker = path.rsplit("/", 2)[-2]  # .../markets/{ticker}/orderbook
+            return per_ticker_books.get(ticker, {})
+        return {}
+
+    rest.request.side_effect = _fake
+    return rest
+
+
+class TestSnapshotBooksParallel:
+    def test_no_tickers_is_noop(self):
+        """Empty market_meta → no workers spawned, no exception."""
+        rest = _dispatching_rest(_market_payload(), orderbook_body={})
+        coord = _mk_coord(rest)
+        # No discover() call — _market_meta is empty.
+        coord.snapshot_books()
+        # Pool stays uninitialized when nothing to do.
+        assert coord._snapshot_pool is None
+
+    def test_parallel_fetch_faster_than_sequential(self):
+        """With 7 tickers × 50ms each, parallel (10 workers) should finish
+        in ~1 delay; sequential would take ~7 × delay."""
+        import time as _t
+        books = {
+            f"KX{s}15M-26APR201500-00": {"orderbook_fp":
+                {"yes_dollars": [["0.40", "5"]], "no_dollars": [["0.59", "5"]]}}
+            for s in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE")
+        }
+        rest = _dispatching_rest_slow(_market_payload(), books, delay_s=0.05)
+        coord = _mk_coord(rest)
+        coord.discover()   # populates 7 tickers
+        assert len(coord._market_meta) == 7
+
+        t0 = _t.monotonic()
+        coord.snapshot_books()
+        elapsed_s = _t.monotonic() - t0
+        coord.close()
+
+        # Sequential lower bound: 7 × 0.05s = 0.35s. Parallel upper bound:
+        # ~0.15s (one wave with overhead). Assert the gap to prove
+        # parallelism is actually happening.
+        assert elapsed_s < 0.30, (
+            f"snapshot_books took {elapsed_s:.3f}s — expected parallel "
+            f"(< 0.30s), got sequential-ish timing"
+        )
+
+    def test_per_ticker_exception_does_not_block_others(self):
+        """One failing ticker must not break the others."""
+        rest = MagicMock()
+
+        def _fake(method, path, **kwargs):
+            if path == "/markets":
+                series = kwargs["params"]["series_ticker"]
+                return {"markets": [{**_market_payload(),
+                                     "ticker": f"{series}-26APR201500-00"}]}
+            if "/orderbook" in path:
+                if "BTC" in path:
+                    raise RuntimeError("503 synthetic")
+                return {"orderbook_fp":
+                        {"yes_dollars": [["0.50", "10"]],
+                         "no_dollars":  [["0.49", "10"]]}}
+            return {}
+        rest.request.side_effect = _fake
+        coord = _mk_coord(rest)
+        coord.discover()
+        coord.snapshot_books()
+        coord.close()
+
+        # BTC's book stays empty (fetch raised); any other asset that
+        # succeeded has a parsed book.
+        with coord._market_source._books_lock:
+            books = dict(coord._market_source._books)
+        btc = books.get("KXBTC15M-26APR201500-00")
+        eth = books.get("KXETH15M-26APR201500-00")
+        # BTC entry should exist only if a prior snapshot succeeded;
+        # here it's the first pass, so BTC is absent.
+        assert btc is None or btc.book == {"yes": [], "no": []}
+        # ETH (and the other non-BTC assets) landed.
+        assert eth is not None
+        assert eth.book["yes"] == [["0.50", "10"]]
+
+    def test_max_workers_is_configurable(self):
+        """`snapshot_max_workers=1` forces sequential execution — useful for
+        tests and for staying under Kalshi's Basic-tier read-rate limit."""
+        rest = _dispatching_rest(_market_payload(), orderbook_body={
+            "orderbook_fp": {"yes_dollars": [], "no_dollars": []},
+        })
+        coord = rks.LiveDataCoordinator(
+            rest_client=rest,
+            reference_fetcher=lambda asset: None,
+            market_source=KalshiMarketSource(KalshiMarketConfig()),
+            reference_source=BasketReferenceSource(
+                assets=tuple(set(rks.ASSET_FROM_SERIES.values()))
+            ),
+            snapshot_max_workers=1,
+        )
+        coord.discover()
+        coord.snapshot_books()
+        # Pool was created and has exactly 1 worker.
+        assert coord._snapshot_pool._max_workers == 1
+        coord.close()
+
+    def test_pool_reused_across_ticks(self):
+        rest = _dispatching_rest(_market_payload(), orderbook_body={})
+        coord = _mk_coord(rest)
+        coord.discover()
+        coord.snapshot_books()
+        pool_ref_1 = coord._snapshot_pool
+        coord.snapshot_books()
+        pool_ref_2 = coord._snapshot_pool
+        assert pool_ref_1 is pool_ref_2   # same pool, no thrash
+        coord.close()
+
+    def test_close_is_idempotent(self):
+        rest = _dispatching_rest(_market_payload(), orderbook_body={})
+        coord = _mk_coord(rest)
+        coord.discover()
+        coord.snapshot_books()
+        coord.close()
+        coord.close()  # second call must not raise
+        assert coord._snapshot_pool is None
+
+    def test_close_without_any_snapshot_is_safe(self):
+        """`close()` before the first snapshot — pool was never created."""
+        coord = _mk_coord(_dispatching_rest(_market_payload(), {}))
+        coord.close()  # no crash
+        assert coord._snapshot_pool is None

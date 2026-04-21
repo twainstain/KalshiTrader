@@ -985,6 +985,32 @@ def _fmt_age(seconds: float | None) -> str:
     return f"{seconds / 86400:.1f}d"
 
 
+# "EST" in trading parlance means America/New_York — i.e. auto-switches
+# to EDT during DST. Using ZoneInfo keeps the label accurate year-round
+# (the rendered suffix will read "EDT" in summer, "EST" in winter).
+_EST_TZ_NAME = "America/New_York"
+
+
+def _fmt_ts_est(us: Any) -> str:
+    """Render a microsecond epoch as `YYYY-MM-DD HH:MM:SS TZ` in New York
+    time. Returns an em-dash span for None / empty / unparseable input so
+    table cells stay readable instead of raising into a 500."""
+    if us is None or us == "":
+        return '<span class="muted">—</span>'
+    try:
+        ts_us = int(us)
+    except (TypeError, ValueError):
+        return '<span class="muted">—</span>'
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(_EST_TZ_NAME)
+    except Exception:  # noqa: BLE001 — tz database missing → fall back to UTC
+        tz = timezone.utc
+    dt = datetime.fromtimestamp(ts_us / 1_000_000, tz=timezone.utc).astimezone(tz)
+    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def _page(title: str, body_html: str, *, refresh_s: int = 10,
           start: str | None = None, end: str | None = None) -> str:
     return f"""<!doctype html>
@@ -1075,6 +1101,7 @@ def _render_overview(d: dict[str, Any], wallet: WalletSnapshot | None) -> str:
 
     ref_rows = "".join(
         f"<tr><td>{r['asset']}</td><td>{_fmt_age(r.get('age_seconds'))}</td>"
+        f"<td>{_fmt_ts_est(r.get('ts_us'))}</td>"
         f"<td class=\"muted\">{r.get('ts_us') or '—'}</td></tr>"
         for r in d["reference_freshness"]
     )
@@ -1083,7 +1110,8 @@ def _render_overview(d: dict[str, Any], wallet: WalletSnapshot | None) -> str:
     <div class="grid">{''.join(cards)}</div>
     <div class="card">
       <h2>Reference feed</h2>
-      <table><thead><tr><th>asset</th><th>age</th><th>last tick (µs)</th></tr></thead>
+      <table><thead><tr><th>asset</th><th>age</th>
+      <th>last tick</th><th>ts_us</th></tr></thead>
       <tbody>{ref_rows}</tbody></table>
     </div>
     """
@@ -1091,13 +1119,15 @@ def _render_overview(d: dict[str, Any], wallet: WalletSnapshot | None) -> str:
 
 def _render_decisions(rows: list[dict], strategy: str | None) -> str:
     filter_note = f" (filter: <code>{strategy}</code>)" if strategy else ""
-    head = ("<tr><th>ts_us</th><th>strategy</th><th>ticker</th><th>side</th>"
+    head = ("<tr><th>datetime (ET)</th><th>ts_us</th><th>strategy</th>"
+            "<th>ticker</th><th>side</th>"
             "<th>fill</th><th>size</th><th>edge (bps)</th>"
             "<th>t−remaining</th><th>outcome</th><th>P/L</th></tr>")
     tr = []
     for r in rows:
         tr.append(
-            f"<tr><td>{r.get('ts_us','')}</td>"
+            f"<tr><td>{_fmt_ts_est(r.get('ts_us'))}</td>"
+            f"<td class=\"muted\">{r.get('ts_us','')}</td>"
             f"<td>{r.get('strategy_label') or '(none)'}</td>"
             f"<td>{r.get('market_ticker','')}</td>"
             f"<td>{r.get('recommended_side','')}</td>"
@@ -1325,14 +1355,15 @@ def _render_ops_events_table(events: list[dict[str, Any]]) -> str:
             if extras else ""
         )
         rows.append(
-            f'<tr><td class="muted">{e.get("ts_us")}</td>'
+            f'<tr><td>{_fmt_ts_est(e.get("ts_us"))}</td>'
+            f'<td class="muted">{e.get("ts_us")}</td>'
             f'<td>{e.get("source", "")}</td>'
             f'<td class="{cls}">{level}</td>'
             f'<td>{e.get("message", "")}</td>'
             f'<td class="muted">{extras_str}</td></tr>'
         )
-    head = ("<tr><th>ts (µs)</th><th>source</th><th>level</th>"
-            "<th>message</th><th>extras</th></tr>")
+    head = ("<tr><th>datetime (ET)</th><th>ts_us</th><th>source</th>"
+            "<th>level</th><th>message</th><th>extras</th></tr>")
     return (
         '<div class="card"><h2>Events</h2>'
         f'<table><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table>'

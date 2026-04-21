@@ -11,7 +11,7 @@
       "rolling_window_us": 5000000,
       "min_edge_bps_after_fees": "150",
       "min_book_depth_usd": "200",
-      "time_window_seconds": [5, 60],
+      "time_window_seconds": [5, 300],
       "hypothetical_size_contracts": "10",
       "min_fill_price": "0.15"
     }
@@ -30,7 +30,7 @@
   "risk": {
     "_comment": "Tightened vs paper — P2-M5 starts with 1 concurrent position and $100/day loss stop per plan §7.",
     "min_edge_after_fees_bps": "150",
-    "time_window_s": [5, 60],
+    "time_window_s": [5, 300],
     "max_ci_width": "0.15",
     "max_concurrent_positions": 1,
     "daily_loss_stop_usd": "100",

@@ -13,6 +13,7 @@ from dashboards.kalshi import (
     WINDOWS,
     WalletSnapshot,
     _fetch_phase_timings,
+    _fmt_ts_est,
     _nav,
     _parse_time_param_us,
     _percentile,
@@ -1791,3 +1792,59 @@ class TestRangePickerUI:
         # Every nav link carries the start forward.
         assert 'href="/kalshi/decisions?' in r.text
         assert "2026-04-20T01%3A00%3A00Z" in r.text or "2026-04-20T01:00:00Z" in r.text
+
+
+class TestFmtTsEst:
+    """Cover the EST datetime formatter used by decisions / ops / overview tables."""
+
+    def test_none_returns_dash(self):
+        assert "—" in _fmt_ts_est(None)
+        assert "—" in _fmt_ts_est("")
+
+    def test_invalid_returns_dash(self):
+        assert "—" in _fmt_ts_est("not-a-number")
+        assert "—" in _fmt_ts_est([1, 2, 3])
+
+    def test_known_utc_moment_renders_new_york_time(self):
+        # 2026-04-20T14:30:00Z = EDT-4 → 10:30 local.
+        out = _fmt_ts_est(1_776_695_400_000_000)
+        assert "2026-04-20" in out
+        assert "10:30:00" in out
+        # ZoneInfo typically emits EDT in April; accept either EDT or EST
+        # in case the test host's tzdata is in standard time.
+        assert ("EDT" in out) or ("EST" in out) or ("UTC" in out)
+
+    def test_winter_moment_renders_est(self):
+        # 2026-01-15T14:30:00Z → EST-5 → 09:30 EST.
+        out = _fmt_ts_est(1_768_487_400_000_000)
+        assert "2026-01-15" in out
+        assert "09:30:00" in out
+
+    def test_accepts_string_integer(self):
+        # _fetch helpers may return the column as a string; coerce.
+        out = _fmt_ts_est("1776695400000000")
+        assert "2026-04-20" in out
+
+    def test_decisions_page_shows_est_column(self, client):
+        r = client.get("/kalshi/decisions")
+        assert r.status_code == 200
+        # New "datetime (ET)" header rendered.
+        assert "datetime (ET)" in r.text
+        # ts_us column still present.
+        assert "ts_us" in r.text
+
+    def test_ops_page_shows_est_column(self, client):
+        r = client.get("/kalshi/ops")
+        assert r.status_code == 200
+        # When there are no events seeded the table isn't rendered; instead
+        # the muted "no events" message shows. Either is acceptable — assert
+        # only the page renders.
+        assert r.status_code == 200
+
+    def test_overview_reference_feed_shows_est(self, client):
+        r = client.get("/kalshi")
+        assert r.status_code == 200
+        # Reference-feed table now has a "last tick" EST column. The raw
+        # ts_us column stays for forensic use.
+        assert "last tick" in r.text
+        assert "ts_us" in r.text

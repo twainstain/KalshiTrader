@@ -106,10 +106,20 @@ def db_sink(database_url: str, *, now_us: Callable[[], int] | None = None) -> Si
     _now = now_us or (lambda: int(time.time() * 1_000_000))
 
     def _write(source: str, level: str, message: str, extras: dict | None) -> None:
-        conn = sqlite3.connect(path, isolation_level=None, timeout=5.0)
+        # Timeout bumped 5→30s on 2026-04-21: observed `database is locked`
+        # bursts when the scanner's long-running write connection contends
+        # with the sink under WAL. `ops_events` is fire-and-forget, so we
+        # can afford the longer wait before the outer try/except logs the
+        # failure.
+        conn = sqlite3.connect(path, isolation_level=None, timeout=30.0)
         try:
-            # WAL so reads from the dashboard don't block this writer.
+            # WAL is a per-database state; setting it once is enough, but
+            # re-asserting per-connection is cheap and safe.
             conn.execute("PRAGMA journal_mode=WAL")
+            # `synchronous=NORMAL` is the recommended companion to WAL for
+            # append-only log workloads — we don't need fsync-per-INSERT
+            # durability on an observability stream.
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(
                 "INSERT INTO ops_events (ts_us, source, level, message, extras_json) "
                 "VALUES (?, ?, ?, ?, ?)",

@@ -123,6 +123,29 @@ def test_insert_select_roundtrip_per_table(sqlite_url, sqlite_path):
              "10.00", "yes", "sell", "buy", "", "best.gun2", "",
              "social-1", "taker", 7_000, json.dumps({"k": "v"})),
         )
+        conn.execute(
+            "INSERT INTO kalshi_series "
+            "(series_ticker, category, title, frequency, contract_terms_url, raw_json, fetched_ts) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("FEDDECISION", "Economics", "Fed Decision", "scheduled", "https://kalshi-public-docs.s3.amazonaws.com/contract_terms/FEDDECISION.pdf", json.dumps({"k": "v"}), 8_000),
+        )
+        conn.execute(
+            "INSERT INTO kalshi_contract_terms "
+            "(pdf_url, series_ticker_guess, local_path, bytes, sha256, fetched_ts) "
+            "VALUES (?,?,?,?,?,?)",
+            ("https://kalshi-public-docs.s3.amazonaws.com/contract_terms/FEDDECISION.pdf", "FEDDECISION", "/tmp/FEDDECISION.pdf", 123, "abc", 9_000),
+        )
+        conn.execute(
+            "INSERT INTO kalshi_lag_candidates "
+            "(series_ticker, category, title, source_type, source_agency, source_url, "
+            " publish_schedule_utc, ltt_to_expiry_s, strategy_hypothesis, lag_priority_score, "
+            " priority_band, notes, raw_json, built_ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("FEDDECISION", "Economics", "Fed Decision", "scheduled_release", "Federal Reserve",
+             "https://www.federalreserve.gov/newsevents/pressreleases/monetary.htm",
+             "18:00 UTC on FOMC statement days", 300, "scheduled_release_lag", 92,
+             "high", "base=scheduled_release", json.dumps({"k": "v"}), 10_000),
+        )
         conn.commit()
 
         assert conn.execute(
@@ -148,6 +171,15 @@ def test_insert_select_roundtrip_per_table(sqlite_url, sqlite_path):
         ).fetchone()[0] == 1
         assert conn.execute(
             "SELECT COUNT(*) FROM kalshi_ideas_trades"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kalshi_series"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kalshi_contract_terms"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kalshi_lag_candidates"
         ).fetchone()[0] == 1
     finally:
         conn.close()

@@ -180,15 +180,17 @@ def test_evaluate_many_skips_unmapped_tickers():
 def test_config_defaults_calibrated_2026_04_21():
     """Live-run calibrated defaults — see docstring in PureLagConfig.
 
-    time_window tightened to (5, 60) on 2026-04-21 to match the RiskEngine's
-    TimeWindowRule — decisions outside that window were always risk-rejected
-    before becoming paper fills, making them pure noise in shadow_decisions.
+    time_window widened to (5, 300) on 2026-04-21 evening: (5, 60) gave
+    only 220 eligible seconds/hour because Kalshi opens one market per
+    asset at a time and they all close synchronously. (5, 300) means the
+    scanner has continuous coverage — 5 min × 4 cycles per 15-min cycle.
+    Paired with RiskEngine.TimeWindowRule([5, 300]).
     """
     cfg = PureLagConfig()
     assert cfg.move_threshold_bps == Decimal("3")
     assert cfg.rolling_window_us == 5_000_000
     assert cfg.min_edge_bps_after_fees == Decimal("100")
-    assert cfg.time_window_seconds == (5, 60)
+    assert cfg.time_window_seconds == (5, 300)
     assert cfg.min_fill_price == Decimal("0.10")
 
 
@@ -251,7 +253,7 @@ def test_evaluate_accepts_t_inside_tightened_window():
 
 
 def test_evaluate_rejects_t_above_max():
-    """With time_window=(5, 60), anything t >= 60 is dropped before the
+    """With time_window=(5, 300), anything t >= 300 is dropped before the
     risk engine would reject it anyway."""
     now_fn, state = _now_factory(0)
     s = PureLagStrategy(PureLagConfig(), now_us=now_fn)
@@ -259,9 +261,9 @@ def test_evaluate_rejects_t_above_max():
     s.record_reference_tick("btc", Decimal("65000"))
     state["t"] = 1_000_000
     s.record_reference_tick("btc", Decimal("65130"))
-    q = _quote(time_remaining_s=Decimal("60"))       # at the exclusive cap
+    q = _quote(time_remaining_s=Decimal("300"))      # at the exclusive cap
     assert s.evaluate(q, asset="btc") is None
-    q2 = _quote(time_remaining_s=Decimal("120"))     # well outside
+    q2 = _quote(time_remaining_s=Decimal("600"))     # well outside
     assert s.evaluate(q2, asset="btc") is None
 
 
